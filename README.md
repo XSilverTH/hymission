@@ -342,6 +342,7 @@ hl.config({
 
             -- Label picking and window controls
             pick_labels_enabled = 0,
+            pick_labels_show = 1,
             pick_labels_mode = "sequential",
             pick_labels_direct_activate = 0,
             window_decoration_enabled = 1,
@@ -494,12 +495,13 @@ continues to use `hl.plugin.hymission.gesture({ ..., action = "workspace" })`.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `pick_labels_enabled` | bool | `0` | Show keyboard pick labels on previews and enable direct keyboard selection in the configured `pick_labels_mode`. Reuses `close_button_color` / `close_button_glyph_color` / `close_button_size` for styling; previews too small for a legible chip skip drawing it but remain selectable. |
-| `pick_labels_mode` | string | `sequential` | `sequential` keeps the numbered `1`-`9`, `A1`-`Z9` scheme. `spatial` maps the physical ANSI alphanumeric block to preview centers across the participating monitors. Up to 36 windows receive distinct single-key labels; denser layouts share a primary key and show a two-key route such as `FF` or `FR`. |
+| `pick_labels_enabled` | bool | `0` | Enable direct keyboard selection in the configured `pick_labels_mode`. When labels are shown, it reuses `close_button_color` / `close_button_glyph_color` / `close_button_size` for styling; previews too small for a legible chip skip drawing it but remain selectable. |
+| `pick_labels_show` | bool | `1` | Controls whether label chips are drawn. Set to `0` to keep keyboard picking active without displaying labels; `pick_labels_enabled` must still be `1`. |
+| `pick_labels_mode` | string | `sequential` | `sequential` keeps the numbered `1`-`9`, `A1`-`Z9` scheme. `spatial` maps the physical ANSI alphanumeric and punctuation area to preview centers across the participating monitors. Up to 47 windows receive distinct single-key labels; denser layouts share a primary key and show a two-key route such as `FF` or `FR`. |
 | `pick_labels_direct_activate` | bool | `0` | Only applies when `pick_labels_enabled = 1`. `0` only moves the selection (still requires `Return` to confirm, same as arrow keys); `1` activates and closes overview immediately when a pick label is hit. |
 
 - In `sequential` mode, past the 9th window a letter key (`A`-`Z`) arms a ~1.5s prefix waiting for its digit (e.g. `A` then `2` picks `A2`); any other key cancels the prefix without losing its own normal effect (e.g. `Esc` still closes overview).
-- In `spatial` mode, key positions and activation use physical keycodes, while badge text follows the active keyboard's current XKB layout automatically (using its unshifted level, so Shift/Caps Lock do not change the badge). A shared primary waits up to ~1.5s for the same key (center) or an adjacent key in the labelled direction; equivalent adjacent keys in that direction are also accepted.
+- In `spatial` mode, key positions and activation use physical ANSI alphanumeric and punctuation keycodes (`` ` 1-0 - = Q-P [ ] \\ A-L ; ' Z-M , . / ``), while badge text follows the active keyboard's current XKB layout automatically (using its unshifted level, so Shift/Caps Lock do not change the badge). A shared primary waits up to ~1.5s for the same key (center) or an adjacent key in the labelled direction; equivalent adjacent keys in that direction are also accepted.
 
 ### Window decorations and controls
 

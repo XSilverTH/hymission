@@ -515,6 +515,7 @@ xkb_keysym_t keysymFromConfiguredSwitchReleaseKey(const std::string& value) {
 
 std::optional<char> spatialPickLabelForPhysicalKeycode(uint32_t keycode) {
     switch (keycode) {
+        case KEY_GRAVE: return '`';
         case KEY_1: return '1';
         case KEY_2: return '2';
         case KEY_3: return '3';
@@ -525,6 +526,8 @@ std::optional<char> spatialPickLabelForPhysicalKeycode(uint32_t keycode) {
         case KEY_8: return '8';
         case KEY_9: return '9';
         case KEY_0: return '0';
+        case KEY_MINUS: return '-';
+        case KEY_EQUAL: return '=';
         case KEY_Q: return 'Q';
         case KEY_W: return 'W';
         case KEY_E: return 'E';
@@ -535,6 +538,9 @@ std::optional<char> spatialPickLabelForPhysicalKeycode(uint32_t keycode) {
         case KEY_I: return 'I';
         case KEY_O: return 'O';
         case KEY_P: return 'P';
+        case KEY_LEFTBRACE: return '[';
+        case KEY_RIGHTBRACE: return ']';
+        case KEY_BACKSLASH: return '\\';
         case KEY_A: return 'A';
         case KEY_S: return 'S';
         case KEY_D: return 'D';
@@ -544,6 +550,8 @@ std::optional<char> spatialPickLabelForPhysicalKeycode(uint32_t keycode) {
         case KEY_J: return 'J';
         case KEY_K: return 'K';
         case KEY_L: return 'L';
+        case KEY_SEMICOLON: return ';';
+        case KEY_APOSTROPHE: return '\'';
         case KEY_Z: return 'Z';
         case KEY_X: return 'X';
         case KEY_C: return 'C';
@@ -551,12 +559,16 @@ std::optional<char> spatialPickLabelForPhysicalKeycode(uint32_t keycode) {
         case KEY_B: return 'B';
         case KEY_N: return 'N';
         case KEY_M: return 'M';
+        case KEY_COMMA: return ',';
+        case KEY_DOT: return '.';
+        case KEY_SLASH: return '/';
         default: return std::nullopt;
     }
 }
 
 std::optional<uint32_t> spatialPickPhysicalKeycodeForLabel(char label) {
     switch (label) {
+        case '`': return KEY_GRAVE;
         case '1': return KEY_1;
         case '2': return KEY_2;
         case '3': return KEY_3;
@@ -567,6 +579,8 @@ std::optional<uint32_t> spatialPickPhysicalKeycodeForLabel(char label) {
         case '8': return KEY_8;
         case '9': return KEY_9;
         case '0': return KEY_0;
+        case '-': return KEY_MINUS;
+        case '=': return KEY_EQUAL;
         case 'Q': return KEY_Q;
         case 'W': return KEY_W;
         case 'E': return KEY_E;
@@ -577,6 +591,9 @@ std::optional<uint32_t> spatialPickPhysicalKeycodeForLabel(char label) {
         case 'I': return KEY_I;
         case 'O': return KEY_O;
         case 'P': return KEY_P;
+        case '[': return KEY_LEFTBRACE;
+        case ']': return KEY_RIGHTBRACE;
+        case '\\': return KEY_BACKSLASH;
         case 'A': return KEY_A;
         case 'S': return KEY_S;
         case 'D': return KEY_D;
@@ -586,6 +603,8 @@ std::optional<uint32_t> spatialPickPhysicalKeycodeForLabel(char label) {
         case 'J': return KEY_J;
         case 'K': return KEY_K;
         case 'L': return KEY_L;
+        case ';': return KEY_SEMICOLON;
+        case '\'': return KEY_APOSTROPHE;
         case 'Z': return KEY_Z;
         case 'X': return KEY_X;
         case 'C': return KEY_C;
@@ -593,6 +612,9 @@ std::optional<uint32_t> spatialPickPhysicalKeycodeForLabel(char label) {
         case 'B': return KEY_B;
         case 'N': return KEY_N;
         case 'M': return KEY_M;
+        case ',': return KEY_COMMA;
+        case '.': return KEY_DOT;
+        case '/': return KEY_SLASH;
         default: return std::nullopt;
     }
 }
@@ -4313,6 +4335,10 @@ bool OverviewController::showFocusIndicatorEnabled() const {
 
 bool OverviewController::pickLabelsEnabled() const {
     return getConfigInt(m_handle, "plugin:hymission:pick_labels_enabled", 0) != 0;
+}
+
+bool OverviewController::pickLabelsShown() const {
+    return getConfigInt(m_handle, "plugin:hymission:pick_labels_show", 1) != 0;
 }
 
 PickLabelsMode OverviewController::pickLabelsMode() const {
@@ -12030,7 +12056,7 @@ void OverviewController::refreshDraggedWindowCompositeTexture() {
 }
 
 void OverviewController::renderPickLabels() const {
-    if (!pickLabelsInteractionAllowed())
+    if (!pickLabelsShown() || !pickLabelsInteractionAllowed())
         return;
 
     const double progress = visualProgress();

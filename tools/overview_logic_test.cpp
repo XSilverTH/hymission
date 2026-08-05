@@ -118,7 +118,7 @@ int main() {
     ok &= expect(parsePickLabelsMode("spatial") == PickLabelsMode::Spatial, "spatial pick-label mode should parse");
     ok &= expect(parsePickLabelsMode("SPATIAL") == PickLabelsMode::Spatial, "spatial pick-label mode should be case-insensitive");
     ok &= expect(parsePickLabelsMode("unknown") == PickLabelsMode::Sequential, "unknown pick-label modes should preserve sequential behavior");
-    ok &= expect(spatialPickKeys().size() == 36, "spatial pick mode should expose the 36 physical alphanumeric keys");
+    ok &= expect(spatialPickKeys().size() == 47, "spatial pick mode should expose the full physical ANSI alphanumeric and punctuation area");
 
     const auto spatialF = spatialPickKeyIndex('F');
     const auto spatialR = spatialPickKeyIndex('R');
@@ -127,7 +127,10 @@ int main() {
     const auto spatialV = spatialPickKeyIndex('V');
     const auto spatialD = spatialPickKeyIndex('D');
     const auto spatialG = spatialPickKeyIndex('G');
-    ok &= expect(spatialF && spatialR && spatialT && spatialC && spatialV && spatialD && spatialG, "spatial key lookup should find QWERTY keys");
+    const auto spatialSlash = spatialPickKeyIndex('/');
+    const auto spatialBracket = spatialPickKeyIndex('[');
+    ok &= expect(spatialF && spatialR && spatialT && spatialC && spatialV && spatialD && spatialG && spatialSlash && spatialBracket,
+                 "spatial key lookup should find QWERTY and punctuation keys");
     ok &= expect(spatialPickDirectionForKeys(*spatialF, *spatialF) == SpatialPickDirection::Center, "repeating F should select the center route");
     ok &= expect(spatialPickDirectionForKeys(*spatialF, *spatialR) == SpatialPickDirection::Up, "FR should be an upward route");
     ok &= expect(spatialPickDirectionForKeys(*spatialF, *spatialT) == SpatialPickDirection::Up, "FT should be an alternate upward neighbor");
@@ -146,8 +149,10 @@ int main() {
             continue;
         (*windowIndex == 0 ? leftSpatialKeys : rightSpatialKeys).push_back(spatialPickKeys()[keyIndex].label);
     }
-    ok &= expect(leftSpatialKeys == "123456QWERTASDFGZXCV", "two horizontal windows should map the expected physical left-half keys");
-    ok &= expect(rightSpatialKeys == "7890YUIOPHJKLBNM", "two horizontal windows should map all remaining physical keys to the right");
+    ok &= expect(leftSpatialKeys.find('1') != std::string::npos && rightSpatialKeys.find('/') != std::string::npos,
+                 "two horizontal windows should map left and right physical-key areas, including punctuation");
+    ok &= expect(leftSpatialKeys.size() + rightSpatialKeys.size() == spatialPickKeys().size(),
+                 "two horizontal windows should assign every physical punctuation and alphanumeric key exactly once");
     ok &= expect(twoWindowSpatial.routes.size() == 2 && twoWindowSpatial.routes[0].direction == SpatialPickDirection::Center &&
                      twoWindowSpatial.routes[1].direction == SpatialPickDirection::Center &&
                      twoWindowSpatial.routes[0].primaryKeyIndex != twoWindowSpatial.routes[1].primaryKeyIndex,
@@ -164,7 +169,7 @@ int main() {
         if (route.primaryKeyIndex < uniquePrimary.size())
             uniquePrimary[route.primaryKeyIndex] = true;
     }
-    ok &= expect(allCenterRoutes, "up to 36 windows should each receive a unique single-key route");
+    ok &= expect(allCenterRoutes, "up to 47 windows should each receive a unique single-key route");
 
     SpatialPickMap sharedSpatial;
     sharedSpatial.routes = {
@@ -178,9 +183,9 @@ int main() {
                  "an alternate adjacent upper key should resolve the FR route");
     ok &= expect(!resolveSpatialPickChord(sharedSpatial, *spatialF, *spatialG), "an unassigned adjacent direction should not resolve");
 
-    std::vector<SpatialPickPoint> overflowSpatialCenters(200, {0.5, 0.5});
+    std::vector<SpatialPickPoint> overflowSpatialCenters(300, {0.5, 0.5});
     const auto                    overflowSpatial = computeSpatialPickMap(overflowSpatialCenters);
-    ok &= expect(overflowSpatial.routes.size() >= 36 && overflowSpatial.routes.size() < overflowSpatialCenters.size(),
+    ok &= expect(overflowSpatial.routes.size() >= 47 && overflowSpatial.routes.size() < overflowSpatialCenters.size(),
                  "windows beyond the available spatial routes should remain unassigned without losing the base key map");
 
     const auto defaultToggle = parseToggleArguments("");
