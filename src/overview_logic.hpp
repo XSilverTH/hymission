@@ -73,6 +73,11 @@ enum class PickLabelsMode {
     Spatial,
 };
 
+enum class GroupedWindowsPolicy {
+    Expanded,
+    Collapsed,
+};
+
 enum class SpatialPickDirection {
     Center,
     Left,
@@ -114,6 +119,11 @@ struct WorkspaceStripReservation {
     Rect content;
 };
 
+struct GroupProjectionInput {
+    std::uintptr_t groupId = 0;
+    bool           current = false;
+};
+
 [[nodiscard]] std::optional<std::size_t> hitTest(const std::vector<Rect>& rects, double x, double y);
 [[nodiscard]] std::optional<std::size_t> chooseDirectionalNeighbor(const std::vector<Rect>& rects, std::size_t currentIndex, Direction direction);
 [[nodiscard]] std::optional<std::size_t> chooseCyclicIndex(std::size_t count, std::size_t currentIndex, int step = 1);
@@ -122,6 +132,12 @@ struct WorkspaceStripReservation {
 [[nodiscard]] std::size_t                computePickOrderIndex(int digit1to9, std::optional<int> letterGroupAtoZ);
 [[nodiscard]] bool                       pickLetterGroupAvailable(std::size_t windowCount, int letterGroupAtoZ);
 [[nodiscard]] PickLabelsMode             parsePickLabelsMode(std::string_view value);
+[[nodiscard]] GroupedWindowsPolicy       parseGroupedWindowsPolicy(std::string_view value);
+[[nodiscard]] std::vector<std::size_t>   projectGroupedWindowIndices(const std::vector<GroupProjectionInput>& inputs, GroupedWindowsPolicy policy);
+[[nodiscard]] std::optional<std::size_t> hitTestEqualSegments(const Rect& bounds, std::size_t count, double x, double y);
+[[nodiscard]] std::vector<Rect>           stackedGroupPreviewRects(const std::vector<Rect>& sourceRects, std::size_t frontIndex, double pointerX,
+                                                                   double pointerY, double grabRatioX, double grabRatioY, double scale,
+                                                                   double layerOffset = 10.0, double maxSpread = 48.0);
 [[nodiscard]] const std::vector<SpatialPickKey>& spatialPickKeys();
 [[nodiscard]] std::optional<std::size_t> spatialPickKeyIndex(char label);
 [[nodiscard]] std::optional<SpatialPickDirection> spatialPickDirectionForKeys(std::size_t primaryKeyIndex, std::size_t secondaryKeyIndex);

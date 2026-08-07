@@ -91,6 +91,7 @@ class OverviewOverlayPassElement final : public IPassElement {
         m_controller->refreshDraggedWindowCompositeTexture();
         m_controller->renderHiddenStripLayerProxies();
         m_controller->renderSelectionChrome();
+        m_controller->renderCollapsedGroupLabels();
         m_controller->renderPickLabels();
         m_controller->renderCloseButtons();
         m_controller->renderWorkspaceStrip();
@@ -217,9 +218,20 @@ constexpr auto   MISSION_CONTROL_HIDDEN_WORKSPACE_PREFIX = "__hymission_hidden__
 constexpr auto   HYPRBARS_PASS_ELEMENT_NAME = "CBarPassElement";
 OverviewController* g_controller = nullptr;
 
-float overviewPreviewAlphaForWindow(const PHLWINDOW& window) {
+float overviewPreviewAlphaForWindow(const PHLWINDOW& window, bool revealGroupedWindow = false) {
     if (!window)
         return 0.0F;
+
+    if (revealGroupedWindow && window->m_group) {
+        float alpha = 1.0F;
+        for (uint8_t value = Desktop::View::WINDOW_ALPHA_FADE; value < Desktop::View::WINDOW_ALPHA_LAST; ++value) {
+            const auto type = static_cast<Desktop::View::eWindowAlpha>(value);
+            if (type == Desktop::View::WINDOW_ALPHA_FULLSCREEN || type == Desktop::View::WINDOW_ALPHA_LAYOUT)
+                continue;
+            alpha *= window->alphaValue(type);
+        }
+        return std::clamp(alpha, 0.0F, 1.0F);
+    }
 
     // WINDOW_ALPHA_FULLSCREEN is compositor occlusion state, not user-facing
     // opacity. Hidden siblings of a fullscreen/maximized window must become
@@ -2086,6 +2098,13 @@ void hkShadowDraw(void* shadowDecorationThisptr, PHLMONITOR monitor, const float
     g_controller->shadowDrawHook(shadowDecorationThisptr, monitor, alpha);
 }
 
+void hkGroupBarDraw(void* groupBarDecorationThisptr, PHLMONITOR monitor, const float& alpha) {
+    if (!g_controller)
+        return;
+
+    g_controller->groupBarDrawHook(groupBarDecorationThisptr, monitor, alpha);
+}
+
 void hkCalculateUVForSurface(void* rendererThisptr, PHLWINDOW window, SP<CWLSurfaceResource> surface, PHLMONITOR monitor, bool main, const Vector2D& projSize,
                              const Vector2D& projSizeUnscaled, bool fixMisalignedFSV1) {
     if (!g_controller)
@@ -2272,6 +2291,10 @@ OverviewController::~OverviewController() {
         HyprlandAPI::removeFunctionHook(m_handle, m_borderDrawHook);
     if (m_shadowDrawHook)
         HyprlandAPI::removeFunctionHook(m_handle, m_shadowDrawHook);
+    if (m_groupBarDrawHook) {
+        m_groupBarDrawHook->unhook();
+        HyprlandAPI::removeFunctionHook(m_handle, m_groupBarDrawHook);
+    }
     if (m_calculateUVForSurfaceHook)
         HyprlandAPI::removeFunctionHook(m_handle, m_calculateUVForSurfaceHook);
     if (m_workspaceSwipeBeginFunctionHook)
@@ -2313,6 +2336,10 @@ bool OverviewController::initialize() {
         // has produced corrupted button/state values on current Hyprland builds.
         const auto copiedEvent = event;
         if (handleMouseButton(copiedEvent))
+            info.cancelled = true;
+    });
+    m_mouseAxisListener = events.input.mouse.axis.listen([this](const IPointer::SAxisEvent& event, Event::SCallbackInfo& info) {
+        if (handleMouseAxis(event))
             info.cancelled = true;
     });
     m_touchDownListener = events.input.touch.down.listen([this](const ITouch::SDownEvent& event, Event::SCallbackInfo& info) {
@@ -2359,7 +2386,11 @@ bool OverviewController::initialize() {
         if (isVisible() && shouldHandleInput())
             updateHoveredFromPointer(false, false, false, false, "monitor-focused");
     });
-    m_configReloadedListener = events.config.reloaded.listen([this] { replaceNativeWorkspaceGestures("config-reloaded"); });
+    m_configReloadedListener = events.config.reloaded.listen([this] {
+        replaceNativeWorkspaceGestures("config-reloaded");
+        if (isVisible())
+            scheduleVisibleStateRebuild();
+    });
 
     replaceNativeWorkspaceGestures("initialize");
 
@@ -2662,6 +2693,7 @@ std::string OverviewController::overviewStateJson() const {
         {"version", 1},
         {"active", isVisible()},
         {"phase", phaseName()},
+        {"groupedWindowsPolicy", groupedWindowsPolicy() == GroupedWindowsPolicy::Collapsed ? "collapsed" : "expanded"},
         {"windows", nlohmann::json::array()},
     };
 
@@ -2689,6 +2721,13 @@ std::string OverviewController::overviewStateJson() const {
 
         if (managed.targetMonitor)
             item["monitor"] = managed.targetMonitor->m_name;
+        if (managed.group) {
+            item["groupSize"] = managed.group->size();
+            item["groupCurrentIndex"] = managed.group->getCurrentIdx();
+            item["groupCollapsed"] = managed.collapsedGroup;
+        }
+        if (managed.dragOnly)
+            item["dragOnly"] = true;
 
         root["windows"].push_back(std::move(item));
     }
@@ -2795,6 +2834,7 @@ void OverviewController::renderStage(eRenderStage stage) {
 
     if (stage == RENDER_POST_WALLPAPER) {
         updateDropAnimation();
+        updateGroupDragSettlement();
         updateOverviewWorkspaceTransition();
         updateAnimation();
         flushQueuedSelectionRetargetDuringOverview();
@@ -2814,7 +2854,8 @@ void OverviewController::renderStage(eRenderStage stage) {
             scheduleWorkspaceStripSnapshotRefresh();
         }
         if ((isAnimating() || m_state.phase == Phase::ClosingSettle || m_state.relayoutActive || m_postOpenRefreshFrames > 0 || m_dropAnimation ||
-             (m_draggedWindowIndex && std::abs(draggedPreviewScale() - m_draggedWindowTargetScale) > 0.001)) &&
+             (m_draggedWindowIndex && (std::abs(draggedPreviewScale() - m_draggedWindowTargetScale) > 0.001 ||
+                                       (m_groupDragSession && m_groupDragSession->settling)))) &&
             !m_deactivatePending) {
             damageOwnedMonitors();
             if (m_postOpenRefreshFrames > 0)
@@ -2857,14 +2898,18 @@ void OverviewController::handleMouseMove() {
                 const auto& managed = m_state.windows[*m_pressedWindowIndex];
                 const Rect  rect = currentPreviewRect(managed);
                 m_dropAnimation.reset();
-                m_draggedWindowIndex = m_pressedWindowIndex;
-                m_draggedWindowPointerOffset = Vector2D{pointer.x - rect.x, pointer.y - rect.y};
-                m_draggedWindowScaleFrom = 1.0;
-                m_draggedWindowTargetScale = DRAG_PREVIEW_SCALE;
-                m_draggedWindowStart = std::chrono::steady_clock::now();
-                m_dragDimStripIndex = m_state.hoveredStripIndex;
-                m_dragDimStart = m_dragDimStripIndex ? m_draggedWindowStart : std::chrono::steady_clock::time_point{};
-                captureDraggedWindowTexture();
+                if (managed.group && managed.group->size() > 1) {
+                    beginGroupDrag(*m_pressedWindowIndex, pointer);
+                } else {
+                    m_draggedWindowIndex = m_pressedWindowIndex;
+                    m_draggedWindowPointerOffset = Vector2D{pointer.x - rect.x, pointer.y - rect.y};
+                    m_draggedWindowScaleFrom = 1.0;
+                    m_draggedWindowTargetScale = DRAG_PREVIEW_SCALE;
+                    m_draggedWindowStart = std::chrono::steady_clock::now();
+                    m_dragDimStripIndex = m_state.hoveredStripIndex;
+                    m_dragDimStart = m_dragDimStripIndex ? m_draggedWindowStart : std::chrono::steady_clock::time_point{};
+                    captureDraggedWindowTexture();
+                }
             }
         }
 
@@ -2873,6 +2918,70 @@ void OverviewController::handleMouseMove() {
     }
 
     updateHoveredFromPointer(true, true, true, true, "mouse-move");
+}
+
+void OverviewController::beginGroupDrag(std::size_t windowIndex, const Vector2D& pointer) {
+    if (windowIndex >= m_state.windows.size())
+        return;
+
+    const ManagedWindow base = m_state.windows[windowIndex];
+    if (!base.window || !base.group || base.group->size() < 2)
+        return;
+
+    GroupDragSession session;
+    session.group = base.group;
+    session.members = base.group->windows();
+    session.sourceRects.reserve(session.members.size());
+    const Rect baseRect = currentPreviewRect(base);
+    session.grabRatioX = baseRect.width > 0.0 ? std::clamp((pointer.x - baseRect.x) / baseRect.width, 0.0, 1.0) : 0.5;
+    session.grabRatioY = baseRect.height > 0.0 ? std::clamp((pointer.y - baseRect.y) / baseRect.height, 0.0, 1.0) : 0.5;
+
+    for (std::size_t memberIndex = 0; memberIndex < session.members.size(); ++memberIndex) {
+        const auto member = session.members[memberIndex].lock();
+        if (!member)
+            continue;
+        if (member == base.window)
+            session.frontMember = memberIndex;
+
+        auto it = std::find_if(m_state.windows.begin(), m_state.windows.end(), [&](const ManagedWindow& managed) { return managed.window == member; });
+        if (it != m_state.windows.end()) {
+            session.sourceRects.push_back(currentPreviewRect(*it));
+            continue;
+        }
+
+        ManagedWindow injected = base;
+        injected.window = member;
+        injected.title = member->m_title;
+        injected.naturalGlobal = baseRect;
+        injected.exitGlobal = baseRect;
+        injected.relayoutFromGlobal = baseRect;
+        injected.targetGlobal = baseRect;
+        injected.previewAlpha = overviewPreviewAlphaForWindow(member, true);
+        injected.isFloating = member->m_isFloating;
+        injected.isPinned = member->m_pinned;
+        injected.collapsedGroup = false;
+        injected.dragOnly = true;
+        m_state.windows.push_back(std::move(injected));
+        session.sourceRects.push_back(baseRect);
+        session.injectedCollapsedMembers = true;
+    }
+
+    if (session.sourceRects.size() != session.members.size()) {
+        rebuildVisibleState(base.window, true);
+        return;
+    }
+
+    m_groupDragSession = std::move(session);
+    m_draggedWindowIndex = windowIndex;
+    m_draggedWindowPointerOffset = Vector2D{pointer.x - baseRect.x, pointer.y - baseRect.y};
+    m_draggedWindowScaleFrom = 1.0;
+    m_draggedWindowTargetScale = DRAG_PREVIEW_SCALE;
+    m_draggedWindowStart = std::chrono::steady_clock::now();
+    m_dragDimStripIndex = m_state.hoveredStripIndex;
+    m_dragDimStart = m_dragDimStripIndex ? m_draggedWindowStart : std::chrono::steady_clock::time_point{};
+    m_draggedWindowFramebuffer.reset();
+    m_draggedWindowTexture.reset();
+    m_draggedWindowCompositeCapture = false;
 }
 
 bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) {
@@ -2886,6 +2995,9 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
 
     if (!shouldHandleInput())
         return false;
+
+    if (m_groupDragSession && m_groupDragSession->settling)
+        return true;
 
     if (m_state.phase == Phase::Closing)
         return true;
@@ -2957,6 +3069,18 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
         return true;
     }
 
+    if (effectiveState == WL_POINTER_BUTTON_STATE_PRESSED) {
+        const auto label = hitTestCollapsedGroupLabel(pointerBeforeUpdate.x, pointerBeforeUpdate.y);
+        if (label && switchCollapsedGroupMember(label->first, label->second, "mouse-group-label")) {
+            m_groupLabelPressLatched = true;
+            return true;
+        }
+    }
+    if (m_groupLabelPressLatched && effectiveState == WL_POINTER_BUTTON_STATE_RELEASED) {
+        m_groupLabelPressLatched = false;
+        return true;
+    }
+
     if (debugLogsEnabled()) {
         std::ostringstream out;
         out << "[hymission] mouse button state=" << static_cast<int>(effectiveState) << " button=" << effectiveButton
@@ -2978,10 +3102,11 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
             const auto  draggedPreview = window ? draggedPreviewRectFor(window) : std::optional<Rect>{};
             const Rect  dragReturnTarget = currentPreviewRect(m_state.windows[draggedIndex]);
             const double dropDecorationScale = draggedPreviewScale();
-            const auto  stripDropTarget = window && hoveredStripIndex ? draggedPreviewTargetFor(window) : std::optional<DragPreviewTarget>{};
+            const auto  dropTarget = window ? draggedPreviewTargetFor(window) : std::optional<DragPreviewTarget>{};
             const auto  dropFramebuffer = m_draggedWindowFramebuffer;
             const auto  dropTexture = m_draggedWindowTexture;
             const auto  dropMonitor = m_state.windows[draggedIndex].targetMonitor;
+            const bool  groupDrag = m_groupDragSession.has_value();
             double      dropInitialDim = 1.0;
             if (m_dragDimStart != std::chrono::steady_clock::time_point{}) {
                 const auto elapsed = std::chrono::steady_clock::now() - m_dragDimStart;
@@ -2990,7 +3115,6 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
                 dropInitialDim = raw * raw * (3.0 - 2.0 * raw);
             }
             PHLWORKSPACE targetWorkspace;
-            clearStripWindowDragState();
 
             if (window && hoveredStripIndex && *hoveredStripIndex < m_state.stripEntries.size()) {
                 const auto& entry = m_state.stripEntries[*hoveredStripIndex];
@@ -3005,11 +3129,38 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
                     targetWorkspace = m_state.managedWorkspaces[targetGroup];
             }
 
+            if (groupDrag && m_groupDragSession && window) {
+                auto& session = *m_groupDragSession;
+                session.settleFrom.clear();
+                for (const auto& memberRef : session.members) {
+                    const auto member = memberRef.lock();
+                    session.settleFrom.push_back(member ? draggedPreviewRectFor(member).value_or(Rect{}) : Rect{});
+                }
+                session.commitDrop = targetWorkspace && window->m_workspace != targetWorkspace && dropTarget.has_value();
+                session.targetWorkspace = session.commitDrop ? targetWorkspace : PHLWORKSPACE{};
+                if (session.commitDrop) {
+                    const Rect leadSource = session.sourceRects[session.frontMember];
+                    const double targetScale = leadSource.width > 1.0 ? std::clamp(dropTarget->preview.width / leadSource.width, 0.05, DRAG_PREVIEW_SCALE) : 0.2;
+                    session.settleTo = stackedGroupPreviewRects(session.sourceRects, session.frontMember, dropTarget->preview.centerX(), dropTarget->preview.centerY(),
+                                                                0.5, 0.5, targetScale, 3.0, 12.0);
+                } else {
+                    session.settleTo = session.sourceRects;
+                }
+                session.settling = true;
+                session.settleStart = std::chrono::steady_clock::now();
+                m_pressedWindowIndex.reset();
+                m_pressedStripIndex.reset();
+                damageOwnedMonitors();
+                return true;
+            }
+
+            clearStripWindowDragState();
+
             if (targetWorkspace && window && window->m_workspace != targetWorkspace) {
                 const auto sourceWorkspace = window->m_workspace;
                 if (draggedPreview)
                     m_dragSettlement = DragSettlement{.window = window, .preview = *draggedPreview};
-                if (draggedPreview && stripDropTarget && dropTexture && dropMonitor) {
+                if (draggedPreview && dropTarget && dropTexture && dropMonitor) {
                     m_dropAnimation = DropAnimation{
                         .window = window,
                         .monitor = dropMonitor,
@@ -3017,7 +3168,7 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
                         .texture = dropTexture,
                         .workspaceId = targetWorkspace->m_id,
                         .from = *draggedPreview,
-                        .to = stripDropTarget->preview,
+                        .to = dropTarget->preview,
                         .initialDim = dropInitialDim,
                         .decorationScale = dropDecorationScale,
                         .start = std::chrono::steady_clock::now(),
@@ -3112,6 +3263,35 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
     return true;
 }
 
+bool OverviewController::handleMouseAxis(const IPointer::SAxisEvent& event) {
+    if (!shouldHandleInput() || !collapsedGroupScrollEnabled() || event.axis != WL_POINTER_AXIS_VERTICAL_SCROLL || m_draggedWindowIndex)
+        return false;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (m_lastCollapsedGroupScroll != std::chrono::steady_clock::time_point{} && now - m_lastCollapsedGroupScroll < std::chrono::milliseconds(90))
+        return true;
+
+    const Vector2D pointer = g_pInputManager->getMouseCoordsInternal();
+    const auto index = hitTestTarget(pointer.x, pointer.y);
+    if (!index || *index >= m_state.windows.size())
+        return false;
+
+    const auto& managed = m_state.windows[*index];
+    if (!managed.collapsedGroup || !managed.group || managed.group->size() < 2)
+        return false;
+
+    const double delta = event.deltaDiscrete != 0 ? static_cast<double>(event.deltaDiscrete) : event.delta;
+    if (std::abs(delta) < 0.001)
+        return true;
+
+    const std::size_t count = managed.group->size();
+    const std::size_t current = std::min(managed.group->getCurrentIdx(), count - 1);
+    const auto next = chooseCyclicIndex(count, current, delta > 0.0 ? 1 : -1);
+    if (next && switchCollapsedGroupMember(*index, *next, "mouse-group-scroll"))
+        m_lastCollapsedGroupScroll = now;
+    return true;
+}
+
 void OverviewController::handleKeyboard(const IKeyboard::SKeyEvent& event, Event::SCallbackInfo& info) {
     const auto keyboard = inputKeyboardWithState();
     if (!keyboard || !keyboard->m_xkbState)
@@ -3122,6 +3302,11 @@ void OverviewController::handleKeyboard(const IKeyboard::SKeyEvent& event, Event
 
     if (!shouldHandleInput())
         return;
+
+    if (m_groupDragSession && m_groupDragSession->settling) {
+        info.cancelled = true;
+        return;
+    }
 
     if (m_state.phase == Phase::Closing)
         return;
@@ -3186,6 +3371,9 @@ void OverviewController::handleWindowSetChange(PHLWINDOW window, WindowSetChange
         clearPendingWindowGeometryRetry();
         return;
     }
+
+    if (m_groupDragSession && m_groupDragSession->group && m_groupDragSession->group->has(window))
+        clearStripWindowDragState();
 
     if (!isVisible())
         return;
@@ -3656,6 +3844,15 @@ void OverviewController::shadowDrawHook(void* shadowDecorationThisptr, const PHL
     }
 
     renderOverviewShadowForWindow(window, monitor, alpha);
+}
+
+void OverviewController::groupBarDrawHook(void* groupBarDecorationThisptr, const PHLMONITOR& monitor, const float& alpha) {
+    if (!m_groupBarDrawOriginal)
+        return;
+
+    const auto window = g_pHyprRenderer->m_renderData.currentWindow.lock();
+    if (rawWindowRenderActive() || !window || !monitor || !isVisible() || !ownsMonitor(monitor) || !hasManagedWindow(window))
+        m_groupBarDrawOriginal(groupBarDecorationThisptr, monitor, alpha);
 }
 
 void OverviewController::calculateUVForSurfaceHook(const PHLWINDOW& window, SP<CWLSurfaceResource> surface, const PHLMONITOR& monitor, bool main, const Vector2D& projSize,
@@ -4343,6 +4540,18 @@ bool OverviewController::pickLabelsShown() const {
 
 PickLabelsMode OverviewController::pickLabelsMode() const {
     return parsePickLabelsMode(getConfigString(m_handle, "plugin:hymission:pick_labels_mode", "sequential"));
+}
+
+GroupedWindowsPolicy OverviewController::groupedWindowsPolicy() const {
+    return parseGroupedWindowsPolicy(getConfigString(m_handle, "plugin:hymission:grouped_windows_policy", "expanded"));
+}
+
+bool OverviewController::collapsedGroupLabelsEnabled() const {
+    return getConfigInt(m_handle, "plugin:hymission:grouped_windows_collapsed_labels", 1) != 0;
+}
+
+bool OverviewController::collapsedGroupScrollEnabled() const {
+    return getConfigInt(m_handle, "plugin:hymission:grouped_windows_collapsed_scroll", 1) != 0;
 }
 
 bool OverviewController::pickLabelsDirectActivateEnabled() const {
@@ -6613,6 +6822,10 @@ bool OverviewController::installHooks() {
         return false;
     }
 
+    if (!hookFunction("draw", "CHyprGroupBarDecoration::draw(", m_groupBarDrawHook, reinterpret_cast<void*>(&hkGroupBarDraw))) {
+        notify("[hymission] groupbar draw hook unavailable; grouped previews may retain the native bar", CHyprColor(1.0, 0.65, 0.2, 1.0), 4000);
+    }
+
     if (!hookFunction("calculateUVForSurface",
                       std::vector<std::string>{"IElementRenderer::calculateUVForSurface(", "CHyprRenderer::calculateUVForSurface("},
                       m_calculateUVForSurfaceHook, reinterpret_cast<void*>(&hkCalculateUVForSurface))) {
@@ -6661,6 +6874,7 @@ bool OverviewController::installHooks() {
     m_surfaceNeedsPrecomputeBlurOriginal = nullptr;
     m_borderDrawOriginal = nullptr;
     m_shadowDrawOriginal = nullptr;
+    m_groupBarDrawOriginal = nullptr;
     m_calculateUVForSurfaceOriginal = nullptr;
     m_rendererDrawElementOriginal = nullptr;
     m_renderLayerOriginal = nullptr;
@@ -6687,6 +6901,7 @@ bool OverviewController::installHooks() {
     activateOptionalHook(m_scrollMoveGestureBeginFunctionHook, m_scrollMoveGestureBeginOriginal, "scroll move gesture begin");
     activateOptionalHook(m_scrollMoveGestureUpdateFunctionHook, m_scrollMoveGestureUpdateOriginal, "scroll move gesture update");
     activateOptionalHook(m_scrollMoveGestureEndFunctionHook, m_scrollMoveGestureEndOriginal, "scroll move gesture end");
+    activateOptionalHook(m_groupBarDrawHook, m_groupBarDrawOriginal, "groupbar decoration draw");
     return true;
 }
 
@@ -6946,6 +7161,12 @@ bool OverviewController::ownsWorkspace(const PHLWORKSPACE& workspace) const {
 
 bool OverviewController::hasManagedWindow(const PHLWINDOW& window) const {
     return managedWindowFor(window) != nullptr;
+}
+
+bool OverviewController::sameOverviewItem(const ManagedWindow& lhs, const ManagedWindow& rhs) const {
+    if (lhs.collapsedGroup || rhs.collapsedGroup)
+        return lhs.collapsedGroup && rhs.collapsedGroup && lhs.group && lhs.group == rhs.group;
+    return lhs.window && lhs.window == rhs.window;
 }
 
 bool OverviewController::isWindowClosePending(const PHLWINDOW& window) const {
@@ -7322,7 +7543,14 @@ PHLWINDOW OverviewController::selectedWindow() const {
 
 float OverviewController::managedPreviewAlphaFor(const PHLWINDOW& window, float fallback) const {
     const auto* managed = managedWindowFor(window);
-    return managed ? managed->previewAlpha : fallback;
+    float alpha = managed ? managed->previewAlpha : fallback;
+    if (managed && m_groupDragSession && m_groupDragSession->settling && m_groupDragSession->commitDrop && managed->group == m_groupDragSession->group) {
+        const auto elapsed = std::chrono::steady_clock::now() - m_groupDragSession->settleStart;
+        const double raw = clampUnit(static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()) /
+                                     static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(STRIP_DROP_ANIMATION_DURATION).count()));
+        alpha *= static_cast<float>(1.0 - raw * raw * (3.0 - 2.0 * raw));
+    }
+    return alpha;
 }
 
 PHLMONITOR OverviewController::preferredMonitorForWindow(const PHLWINDOW& window, const State& state) const {
@@ -8228,7 +8456,7 @@ std::optional<std::size_t> OverviewController::hitTestTarget(double x, double y)
 
         for (std::size_t index = 0; index < m_state.windows.size(); ++index) {
             const auto& managed = m_state.windows[index];
-            if (managed.isNiriFloatingOverlay != floatingOverlay)
+            if (managed.dragOnly || managed.isNiriFloatingOverlay != floatingOverlay)
                 continue;
 
             const Rect rect = currentPreviewRect(managed);
@@ -8258,7 +8486,7 @@ std::optional<std::size_t> OverviewController::hitTestPreviewTarget(double x, do
 
         for (std::size_t index = 0; index < m_state.windows.size(); ++index) {
             const auto& managed = m_state.windows[index];
-            if (managed.isNiriFloatingOverlay != floatingOverlay)
+            if (managed.dragOnly || managed.isNiriFloatingOverlay != floatingOverlay)
                 continue;
 
             const Rect rect = currentPreviewRect(managed);
@@ -8293,6 +8521,8 @@ std::optional<std::size_t> OverviewController::hitTestThumbnailDropTarget(double
     const auto sourceGroup = dragged.slot.rowGroup;
     std::unordered_map<std::size_t, Rect> groupRects;
     for (const auto& managed : m_state.windows) {
+        if (managed.dragOnly)
+            continue;
         const auto targetGroup = managed.slot.rowGroup;
         if (targetGroup == sourceGroup || targetGroup >= m_state.managedWorkspaces.size())
             continue;
@@ -8320,6 +8550,8 @@ std::optional<std::size_t> OverviewController::hitTestThumbnailDropTarget(double
     double                     bestDistance = std::numeric_limits<double>::infinity();
     std::unordered_set<std::size_t> visitedGroups;
     for (std::size_t index = 0; index < m_state.windows.size(); ++index) {
+        if (m_state.windows[index].dragOnly)
+            continue;
         const auto targetGroup = m_state.windows[index].slot.rowGroup;
         if (targetGroup == sourceGroup || visitedGroups.count(targetGroup))
             continue;
@@ -8427,6 +8659,33 @@ std::optional<Rect> OverviewController::draggedPreviewRectFor(const PHLWINDOW& w
     if (!window || !m_draggedWindowIndex || *m_draggedWindowIndex >= m_state.windows.size())
         return std::nullopt;
 
+    if (m_groupDragSession && m_groupDragSession->group && window->m_group == m_groupDragSession->group) {
+        std::optional<std::size_t> memberIndex;
+        for (std::size_t index = 0; index < m_groupDragSession->members.size(); ++index) {
+            if (m_groupDragSession->members[index].lock() == window) {
+                memberIndex = index;
+                break;
+            }
+        }
+        if (!memberIndex)
+            return std::nullopt;
+
+        if (m_groupDragSession->settling && *memberIndex < m_groupDragSession->settleFrom.size() && *memberIndex < m_groupDragSession->settleTo.size()) {
+            const auto elapsed = std::chrono::steady_clock::now() - m_groupDragSession->settleStart;
+            const auto duration = m_groupDragSession->commitDrop ? STRIP_DROP_ANIMATION_DURATION : DRAG_RETURN_ANIMATION_DURATION;
+            const double raw = clampUnit(static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()) /
+                                         static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(duration).count()));
+            return lerpRect(m_groupDragSession->settleFrom[*memberIndex], m_groupDragSession->settleTo[*memberIndex], easeOutCubic(raw));
+        }
+
+        const Vector2D pointer = g_pInputManager->getMouseCoordsInternal();
+        const auto stack = stackedGroupPreviewRects(m_groupDragSession->sourceRects, m_groupDragSession->frontMember, pointer.x, pointer.y,
+                                                    m_groupDragSession->grabRatioX, m_groupDragSession->grabRatioY, draggedPreviewScale());
+        if (*memberIndex < stack.size())
+            return stack[*memberIndex];
+        return std::nullopt;
+    }
+
     const auto& dragged = m_state.windows[*m_draggedWindowIndex];
     if (dragged.window != window)
         return std::nullopt;
@@ -8512,6 +8771,40 @@ void OverviewController::updateDropAnimation() {
 
     if (!m_dropAnimation->window || (!m_dropAnimation->returning && !m_dropAnimation->texture) || dropAnimationProgress() >= 1.0)
         m_dropAnimation.reset();
+}
+
+void OverviewController::updateGroupDragSettlement() {
+    if (!m_groupDragSession || !m_groupDragSession->settling || m_groupDragSession->completionScheduled)
+        return;
+
+    const auto duration = m_groupDragSession->commitDrop ? STRIP_DROP_ANIMATION_DURATION : DRAG_RETURN_ANIMATION_DURATION;
+    if (std::chrono::steady_clock::now() - m_groupDragSession->settleStart < duration)
+        return;
+
+    if (!g_pEventLoopManager)
+        return;
+
+    m_groupDragSession->completionScheduled = true;
+    const bool commitDrop = m_groupDragSession->commitDrop;
+    const auto targetWorkspace = m_groupDragSession->targetWorkspace;
+    const auto frontWindow = m_groupDragSession->frontMember < m_groupDragSession->members.size() ?
+        m_groupDragSession->members[m_groupDragSession->frontMember].lock() : PHLWINDOW{};
+    g_pEventLoopManager->doLater([this, commitDrop, targetWorkspace, frontWindow] {
+        if (!m_groupDragSession)
+            return;
+
+        const auto sourceWorkspace = frontWindow ? frontWindow->m_workspace : PHLWORKSPACE{};
+        clearStripWindowDragState();
+        if (commitDrop && frontWindow && targetWorkspace && sourceWorkspace != targetWorkspace) {
+            moveWindowToWorkspaceForThumbnailDrop(frontWindow, targetWorkspace);
+            refreshWorkspaceLayoutSnapshot(sourceWorkspace, true);
+            refreshWorkspaceLayoutSnapshot(targetWorkspace, true);
+        }
+        if (frontWindow && isVisible())
+            rebuildVisibleState(frontWindow, true);
+        else
+            damageOwnedMonitors();
+    });
 }
 
 PHLWORKSPACE OverviewController::thumbnailWorkspaceAtPoint(double x, double y) const {
@@ -11168,8 +11461,8 @@ void OverviewController::rebuildVisibleState(PHLWINDOW preferredSelectedWindow, 
         return it != previousPreviewRects.end() ? it->second : liveGlobalRectForWindow(window);
     };
 
-    const auto previousManagedForWindow = [&](const PHLWINDOW& window) -> const ManagedWindow* {
-        const auto it = std::find_if(m_state.windows.begin(), m_state.windows.end(), [&](const ManagedWindow& managed) { return managed.window == window; });
+    const auto previousManagedForItem = [&](const ManagedWindow& candidate) -> const ManagedWindow* {
+        const auto it = std::find_if(m_state.windows.begin(), m_state.windows.end(), [&](const ManagedWindow& managed) { return sameOverviewItem(managed, candidate); });
         return it == m_state.windows.end() ? nullptr : &*it;
     };
 
@@ -11179,12 +11472,12 @@ void OverviewController::rebuildVisibleState(PHLWINDOW preferredSelectedWindow, 
         next.pendingExitFocus = {};
 
     const bool sameWindowSet = next.windows.size() == m_state.windows.size() &&
-        std::ranges::all_of(next.windows, [&](const ManagedWindow& managed) { return managed.window && previousManagedForWindow(managed.window) != nullptr; });
+        std::ranges::all_of(next.windows, [&](const ManagedWindow& managed) { return managed.window && previousManagedForItem(managed) != nullptr; });
     const bool sameMonitorSet = next.participatingMonitors.size() == m_state.participatingMonitors.size() &&
         std::ranges::all_of(next.participatingMonitors, [&](const PHLMONITOR& monitor) { return containsHandle(m_state.participatingMonitors, monitor); });
     const bool sameRowGroups = sameWindowSet &&
         std::ranges::all_of(next.windows, [&](const ManagedWindow& managed) {
-            const auto* previousManaged = previousManagedForWindow(managed.window);
+            const auto* previousManaged = previousManagedForItem(managed);
             return previousManaged && previousManaged->slot.rowGroup == managed.slot.rowGroup;
         });
     const bool sameLayoutShape = sameWindowSet && sameMonitorSet && sameRowGroups;
@@ -11194,7 +11487,7 @@ void OverviewController::rebuildVisibleState(PHLWINDOW preferredSelectedWindow, 
     bool shouldAnimateRelayout = false;
     if (freezeExistingLayout) {
         for (auto& window : next.windows) {
-            const auto* previousManaged = previousManagedForWindow(window.window);
+            const auto* previousManaged = previousManagedForItem(window);
             if (!previousManaged)
                 continue;
 
@@ -11206,7 +11499,7 @@ void OverviewController::rebuildVisibleState(PHLWINDOW preferredSelectedWindow, 
         }
     } else if (previousPhase == Phase::Active || selectionRelayoutForced) {
         for (auto& window : next.windows) {
-            if (const auto* previousManaged = previousManagedForWindow(window.window); previousManaged)
+            if (const auto* previousManaged = previousManagedForItem(window); previousManaged)
                 window.exitGlobal = previousManaged->exitGlobal;
 
             const auto it = std::find_if(previousPreviewRects.begin(), previousPreviewRects.end(), [&](const auto& previous) { return previous.first == window.window; });
@@ -11499,6 +11792,9 @@ void OverviewController::clearStripWindowDragState() {
     m_pressedStripIndex.reset();
     m_pressedWindowIndex.reset();
     m_draggedWindowIndex.reset();
+    if (m_groupDragSession && m_groupDragSession->injectedCollapsedMembers)
+        std::erase_if(m_state.windows, [](const ManagedWindow& managed) { return managed.dragOnly; });
+    m_groupDragSession.reset();
     m_dragSettlement.reset();
     m_draggedWindowFramebuffer.reset();
     m_draggedWindowTexture.reset();
@@ -11510,6 +11806,7 @@ void OverviewController::clearStripWindowDragState() {
     m_draggedWindowScaleFrom = 1.0;
     m_draggedWindowTargetScale = DRAG_PREVIEW_SCALE;
     m_draggedWindowStart = {};
+    m_groupLabelPressLatched = false;
 }
 
 void OverviewController::activateStripTarget(std::size_t index) {
@@ -11854,7 +12151,7 @@ void OverviewController::renderBackdrop() const {
 
 void OverviewController::renderSelectionChrome() const {
     const double progress = visualProgress();
-    if (progress <= 0.0)
+    if (progress <= 0.0 || m_draggedWindowIndex)
         return;
 
     const auto renderMonitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
@@ -12055,6 +12352,107 @@ void OverviewController::refreshDraggedWindowCompositeTexture() {
     setTextureLinearFiltering(m_draggedWindowTexture);
 }
 
+Rect OverviewController::collapsedGroupLabelBarRect(const ManagedWindow& managed) const {
+    if (!managed.collapsedGroup || !managed.group || managed.groupMembers.size() < 2)
+        return {};
+
+    const Rect preview = currentPreviewRect(managed);
+    const double height = std::clamp(preview.height * 0.14, 18.0, 30.0);
+    return makeRect(preview.x, preview.y, preview.width, std::min(height, preview.height));
+}
+
+std::optional<std::pair<std::size_t, std::size_t>> OverviewController::hitTestCollapsedGroupLabel(double x, double y) const {
+    if (!collapsedGroupLabelsEnabled() || m_draggedWindowIndex || m_state.phase != Phase::Active)
+        return std::nullopt;
+
+    for (std::size_t index = 0; index < m_state.windows.size(); ++index) {
+        const auto& managed = m_state.windows[index];
+        if (!managed.collapsedGroup || managed.dragOnly || managed.groupMembers.size() < 2)
+            continue;
+        if (const auto member = hitTestEqualSegments(collapsedGroupLabelBarRect(managed), managed.groupMembers.size(), x, y))
+            return std::pair{index, *member};
+    }
+    return std::nullopt;
+}
+
+bool OverviewController::switchCollapsedGroupMember(std::size_t windowIndex, std::size_t memberIndex, const char* source) {
+    if (windowIndex >= m_state.windows.size())
+        return false;
+
+    auto& managed = m_state.windows[windowIndex];
+    if (!managed.collapsedGroup || !managed.group || memberIndex >= managed.group->size())
+        return false;
+
+    const auto member = managed.group->fromIndex(memberIndex);
+    if (!member || !member->m_isMapped)
+        return false;
+
+    managed.group->setCurrent(memberIndex);
+    managed.window = member;
+    managed.title = member->m_title;
+    managed.groupMembers = managed.group->windows();
+    managed.groupCurrentIndex = managed.group->getCurrentIdx();
+    managed.previewAlpha = overviewPreviewAlphaForWindow(member);
+    managed.isFloating = member->m_isFloating;
+    managed.isPinned = member->m_pinned;
+    if (m_state.selectedIndex && *m_state.selectedIndex == windowIndex)
+        m_state.focusDuringOverview = member;
+    if (m_state.pendingExitFocus && managed.group->has(m_state.pendingExitFocus))
+        m_state.pendingExitFocus = member;
+
+    clearSpatialPickCache();
+    m_stripSnapshotsDirty = true;
+    scheduleWorkspaceStripSnapshotRefresh();
+    damageOwnedMonitors();
+    if (debugLogsEnabled()) {
+        std::ostringstream out;
+        out << "[hymission] collapsed group current source=" << (source ? source : "?") << " index=" << memberIndex
+            << " window=" << debugWindowLabel(member);
+        debugLog(out.str());
+    }
+    return true;
+}
+
+void OverviewController::renderCollapsedGroupLabels() const {
+    if (!collapsedGroupLabelsEnabled() || m_draggedWindowIndex)
+        return;
+
+    const double progress = visualProgress();
+    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    if (!monitor || progress <= 0.0)
+        return;
+
+    for (const auto& managed : m_state.windows) {
+        if (!managed.collapsedGroup || managed.dragOnly || managed.targetMonitor != monitor || managed.groupMembers.size() < 2)
+            continue;
+
+        const Rect barGlobal = collapsedGroupLabelBarRect(managed);
+        const Rect bar = rectToMonitorRenderLocal(barGlobal, monitor);
+        const double segmentWidth = bar.width / static_cast<double>(managed.groupMembers.size());
+        if (segmentWidth < 2.0)
+            continue;
+
+        const std::size_t current = managed.group ? managed.group->getCurrentIdx() : managed.groupCurrentIndex;
+        for (std::size_t memberIndex = 0; memberIndex < managed.groupMembers.size(); ++memberIndex) {
+            const auto member = managed.groupMembers[memberIndex].lock();
+            const Rect segment = makeRect(bar.x + segmentWidth * static_cast<double>(memberIndex), bar.y, segmentWidth, bar.height);
+            const CHyprColor fill = colorWithAlphaMultiplier(memberIndex == current ? focusSelectedColor() : closeButtonColor(), progress * (memberIndex == current ? 0.82 : 0.68));
+            g_pHyprOpenGL->renderRect(toBox(segment), fill, {.round = memberIndex == 0 || memberIndex + 1 == managed.groupMembers.size() ? 4 : 0});
+
+            const std::string title = member && !member->m_title.empty() ? member->m_title : std::to_string(memberIndex + 1);
+            const double pad = scaleLengthForRender(monitor, 4.0);
+            const int maxWidth = std::max(1, static_cast<int>(std::floor(segment.width - pad * 2.0)));
+            auto texture = g_pHyprRenderer->renderText(title, colorWithAlphaMultiplier(focusTitleColor(), progress),
+                                                       scaleFontSizeForRender(monitor, std::clamp(barGlobal.height * 0.48, 9.0, 13.0)), false, "", maxWidth);
+            if (!texture)
+                continue;
+            const Rect textRect = makeRect(segment.x + pad, segment.y + (segment.height - texture->m_size.y) * 0.5,
+                                           std::min<double>(texture->m_size.x, maxWidth), texture->m_size.y);
+            g_pHyprOpenGL->renderTexture(texture, toBox(textRect), {});
+        }
+    }
+}
+
 void OverviewController::renderPickLabels() const {
     if (!pickLabelsShown() || !pickLabelsInteractionAllowed())
         return;
@@ -12131,7 +12529,7 @@ void OverviewController::renderPickLabels() const {
 }
 
 void OverviewController::renderCloseButtons() const {
-    if (!closeButtonsEnabled())
+    if (!closeButtonsEnabled() || m_draggedWindowIndex)
         return;
 
     const double progress = visualProgress();
@@ -12300,21 +12698,37 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
 
         if (entryIsHoveredDragTarget) {
             const auto& dragged = m_state.windows[*m_draggedWindowIndex];
-            const Rect naturalGlobal = stateSnapshotGlobalRectForWindow(dragged.window, shouldUseGoalGeometryForStateSnapshot(dragged.window));
-            const std::size_t index = previewState.windows.size();
-            previewState.windows.push_back({
-                .window = dragged.window,
-                .targetMonitor = monitor,
-                .title = dragged.window->m_title,
-                .naturalGlobal = naturalGlobal,
-                .exitGlobal = naturalGlobal,
-                .relayoutFromGlobal = naturalGlobal,
-                .targetGlobal = naturalGlobal,
-                .slot = {.index = index},
-                .previewAlpha = overviewPreviewAlphaForWindow(dragged.window),
-                .isFloating = dragged.window->m_isFloating,
-                .isPinned = dragged.window->m_pinned,
-            });
+            std::vector<PHLWINDOW> draggedWindows;
+            if (m_groupDragSession) {
+                for (const auto& memberRef : m_groupDragSession->members) {
+                    if (const auto member = memberRef.lock())
+                        draggedWindows.push_back(member);
+                }
+            } else if (dragged.window) {
+                draggedWindows.push_back(dragged.window);
+            }
+            for (const auto& draggedWindow : draggedWindows) {
+                if (std::any_of(previewState.windows.begin(), previewState.windows.end(), [&](const ManagedWindow& managed) { return managed.window == draggedWindow; }))
+                    continue;
+                const Rect naturalGlobal = stateSnapshotGlobalRectForWindow(draggedWindow, shouldUseGoalGeometryForStateSnapshot(draggedWindow));
+                const std::size_t index = previewState.windows.size();
+                previewState.windows.push_back({
+                    .window = draggedWindow,
+                    .targetMonitor = monitor,
+                    .title = draggedWindow->m_title,
+                    .naturalGlobal = naturalGlobal,
+                    .exitGlobal = naturalGlobal,
+                    .relayoutFromGlobal = naturalGlobal,
+                    .targetGlobal = naturalGlobal,
+                    .slot = {.index = index},
+                    .previewAlpha = overviewPreviewAlphaForWindow(draggedWindow, static_cast<bool>(draggedWindow->m_group)),
+                    .isFloating = draggedWindow->m_isFloating,
+                    .isPinned = draggedWindow->m_pinned,
+                    .group = draggedWindow->m_group,
+                    .groupMembers = draggedWindow->m_group ? draggedWindow->m_group->windows() : std::vector<PHLWINDOWREF>{},
+                    .groupCurrentIndex = draggedWindow->m_group ? draggedWindow->m_group->getCurrentIdx() : 0,
+                });
+            }
 
             LayoutConfig previewConfig = layoutConfigForState(previewState);
             previewConfig.forceRowGroups = false;
@@ -12972,6 +13386,8 @@ void OverviewController::buildWorkspaceStripEntries(State& state) const {
     }
 
     const auto focusWindow = state.focusDuringOverview ? state.focusDuringOverview : Desktop::focusState()->window();
+    const auto groupPolicy = groupedWindowsPolicy();
+    std::unordered_set<Desktop::View::CGroup*> stripGroups;
     for (const auto& window : Desktop::viewState()->windows()) {
         if (!window || !window->m_isMapped || isWindowFadingOut(window) || window->isHidden())
             continue;
@@ -12979,9 +13395,14 @@ void OverviewController::buildWorkspaceStripEntries(State& state) const {
         if (!windowHasUsableStateGeometry(window))
             continue;
 
+        if (groupPolicy == GroupedWindowsPolicy::Collapsed && window->m_group) {
+            if (window->m_group->current() != window || !stripGroups.insert(window->m_group.get()).second)
+                continue;
+        }
+
         const bool useGoalGeometry = shouldUseGoalGeometryForStateSnapshot(window);
         const auto naturalGlobal = stateSnapshotGlobalRectForWindow(window, useGoalGeometry);
-        const auto previewAlpha = overviewPreviewAlphaForWindow(window);
+        const auto previewAlpha = overviewPreviewAlphaForWindow(window, groupPolicy == GroupedWindowsPolicy::Expanded);
         const auto targetMonitor = preferredMonitorForWindow(window, state);
 
         for (auto& entry : state.stripEntries) {
@@ -13033,6 +13454,7 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
 
     const bool preserveExistingOrder =
         workspaceOverrides.empty() && isVisible() && requestedScope == m_state.collectionPolicy.requestedScope && (!m_state.ownerMonitor || monitor == m_state.ownerMonitor);
+    const auto groupPolicy = groupedWindowsPolicy();
 
     state.ownerMonitor = monitor;
     state.ownerWorkspace = monitor->m_activeWorkspace;
@@ -13170,13 +13592,13 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
     }
 
     if (preserveExistingOrder && !m_state.windows.empty()) {
-        std::unordered_map<PHLWINDOW, std::size_t> previousOrder;
+        std::unordered_map<const void*, std::size_t> previousOrder;
         previousOrder.reserve(m_state.windows.size());
 
         std::vector<std::size_t> visibleOrder;
         visibleOrder.reserve(m_state.windows.size());
         for (std::size_t i = 0; i < m_state.windows.size(); ++i) {
-            if (m_state.windows[i].window)
+            if (m_state.windows[i].window && !m_state.windows[i].dragOnly)
                 visibleOrder.push_back(i);
         }
 
@@ -13202,13 +13624,16 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
 
         for (std::size_t order = 0; order < visibleOrder.size(); ++order) {
             const auto& managed = m_state.windows[visibleOrder[order]];
-            if (managed.window)
-                previousOrder.emplace(managed.window, order);
+            const void* key = managed.collapsedGroup && managed.group ? static_cast<const void*>(managed.group.get()) : static_cast<const void*>(managed.window.get());
+            if (key)
+                previousOrder.emplace(key, order);
         }
 
         std::stable_sort(candidates.begin(), candidates.end(), [&](const PHLWINDOW& lhs, const PHLWINDOW& rhs) {
-            const auto lhsIt = previousOrder.find(lhs);
-            const auto rhsIt = previousOrder.find(rhs);
+            const void* lhsKey = groupPolicy == GroupedWindowsPolicy::Collapsed && lhs && lhs->m_group ? static_cast<const void*>(lhs->m_group.get()) : static_cast<const void*>(lhs.get());
+            const void* rhsKey = groupPolicy == GroupedWindowsPolicy::Collapsed && rhs && rhs->m_group ? static_cast<const void*>(rhs->m_group.get()) : static_cast<const void*>(rhs.get());
+            const auto lhsIt = previousOrder.find(lhsKey);
+            const auto rhsIt = previousOrder.find(rhsKey);
             const bool lhsKnown = lhsIt != previousOrder.end();
             const bool rhsKnown = rhsIt != previousOrder.end();
 
@@ -13366,7 +13791,13 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
     for (const auto& workspace : state.managedWorkspaces)
         refreshWorkspaceLayoutSnapshot(workspace);
 
+    std::unordered_set<Desktop::View::CGroup*> collapsedGroups;
     for (const auto& window : candidates) {
+        if (groupPolicy == GroupedWindowsPolicy::Collapsed && window && window->m_group) {
+            if (window->m_group->current() != window || !collapsedGroups.insert(window->m_group.get()).second)
+                continue;
+        }
+
         if (!shouldManageWindow(window, state))
             continue;
 
@@ -13401,10 +13832,14 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
             .title = window->m_title,
             .naturalGlobal = directNiriSlot ? directNiriSourceGlobal : naturalGlobal,
             .exitGlobal = directNiriSlot ? directNiriSourceGlobal : naturalGlobal,
-            .previewAlpha = overviewPreviewAlphaForWindow(window),
+            .previewAlpha = overviewPreviewAlphaForWindow(window, groupPolicy == GroupedWindowsPolicy::Expanded),
             .isFloating = window->m_isFloating,
             .isPinned = window->m_pinned,
             .isNiriFloatingOverlay = directNiriFloatingOverlay,
+            .group = window->m_group,
+            .groupMembers = window->m_group ? window->m_group->windows() : std::vector<PHLWINDOWREF>{},
+            .groupCurrentIndex = window->m_group ? window->m_group->getCurrentIdx() : 0,
+            .collapsedGroup = groupPolicy == GroupedWindowsPolicy::Collapsed && static_cast<bool>(window->m_group),
         });
 
         if (directNiriSlot) {
@@ -13732,8 +14167,11 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
     applyOffscreenOpenAnimationEndpoints(state);
 
     const auto selectionTarget = preferredSelectedWindow ? preferredSelectedWindow : focusedWindow;
+    const auto representsWindow = [](const ManagedWindow& managed, const PHLWINDOW& target) {
+        return managed.window == target || (managed.collapsedGroup && managed.group && target && managed.group->has(target));
+    };
     for (std::size_t index = 0; index < state.windows.size(); ++index) {
-        if (state.windows[index].window == selectionTarget) {
+        if (representsWindow(state.windows[index], selectionTarget)) {
             state.selectedIndex = index;
             break;
         }
@@ -13741,7 +14179,7 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
 
     if (!state.selectedIndex) {
         for (std::size_t index = 0; index < state.windows.size(); ++index) {
-            if (state.windows[index].window == focusedWindow) {
+            if (representsWindow(state.windows[index], focusedWindow)) {
                 state.selectedIndex = index;
                 break;
             }

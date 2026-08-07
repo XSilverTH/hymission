@@ -358,6 +358,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     INT_CONF("pick_labels_enabled", 0);
     INT_CONF("pick_labels_show", 1);
     STRING_CONF("pick_labels_mode", "sequential");
+    STRING_CONF("grouped_windows_policy", "expanded");
+    INT_CONF("grouped_windows_collapsed_labels", 1);
+    INT_CONF("grouped_windows_collapsed_scroll", 1);
     INT_CONF("pick_labels_direct_activate", 0);
     INT_CONF("window_decoration_enabled", 1);
     INT_CONF("close_button_enabled", 0);

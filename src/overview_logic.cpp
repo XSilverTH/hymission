@@ -6,6 +6,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 namespace hymission {
 
@@ -346,6 +347,88 @@ bool pickLetterGroupAvailable(std::size_t windowCount, int letterGroupAtoZ) {
 PickLabelsMode parsePickLabelsMode(std::string_view value) {
     value = trimAsciiWhitespace(value);
     return equalsAsciiInsensitive(value, "spatial") ? PickLabelsMode::Spatial : PickLabelsMode::Sequential;
+}
+
+GroupedWindowsPolicy parseGroupedWindowsPolicy(std::string_view value) {
+    value = trimAsciiWhitespace(value);
+    return equalsAsciiInsensitive(value, "collapsed") ? GroupedWindowsPolicy::Collapsed : GroupedWindowsPolicy::Expanded;
+}
+
+std::vector<std::size_t> projectGroupedWindowIndices(const std::vector<GroupProjectionInput>& inputs, GroupedWindowsPolicy policy) {
+    std::vector<std::size_t> result;
+    result.reserve(inputs.size());
+    if (policy == GroupedWindowsPolicy::Expanded) {
+        for (std::size_t index = 0; index < inputs.size(); ++index)
+            result.push_back(index);
+        return result;
+    }
+
+    std::unordered_set<std::uintptr_t> emittedGroups;
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+        const auto& input = inputs[index];
+        if (input.groupId == 0) {
+            result.push_back(index);
+            continue;
+        }
+        if (input.current && emittedGroups.insert(input.groupId).second)
+            result.push_back(index);
+    }
+    return result;
+}
+
+std::optional<std::size_t> hitTestEqualSegments(const Rect& bounds, std::size_t count, double x, double y) {
+    if (count == 0 || bounds.width <= 0.0 || bounds.height <= 0.0 || !contains(bounds, x, y))
+        return std::nullopt;
+
+    const double segmentWidth = bounds.width / static_cast<double>(count);
+    if (segmentWidth <= 0.0)
+        return std::nullopt;
+
+    return std::min(count - 1, static_cast<std::size_t>(std::floor((x - bounds.x) / segmentWidth)));
+}
+
+std::vector<Rect> stackedGroupPreviewRects(const std::vector<Rect>& sourceRects, std::size_t frontIndex, double pointerX, double pointerY,
+                                           double grabRatioX, double grabRatioY, double scale, double layerOffset, double maxSpread) {
+    std::vector<Rect> result(sourceRects.size());
+    if (sourceRects.empty() || frontIndex >= sourceRects.size())
+        return result;
+
+    scale = std::clamp(scale, 0.01, 1.0);
+    grabRatioX = std::clamp(grabRatioX, 0.0, 1.0);
+    grabRatioY = std::clamp(grabRatioY, 0.0, 1.0);
+    layerOffset = std::max(0.0, layerOffset);
+    maxSpread = std::max(0.0, maxSpread);
+
+    const Rect& frontSource = sourceRects[frontIndex];
+    const Rect front = {
+        pointerX - frontSource.width * scale * grabRatioX,
+        pointerY - frontSource.height * scale * grabRatioY,
+        std::max(1.0, frontSource.width * scale),
+        std::max(1.0, frontSource.height * scale),
+    };
+    result[frontIndex] = front;
+
+    const std::size_t backCount = sourceRects.size() - 1;
+    const double effectiveOffset = backCount == 0 ? 0.0 : std::min(layerOffset, maxSpread / static_cast<double>(backCount));
+    std::size_t backLayer = 0;
+    for (std::size_t index = 0; index < sourceRects.size(); ++index) {
+        if (index == frontIndex)
+            continue;
+
+        ++backLayer;
+        const Rect& source = sourceRects[index];
+        const double width = std::max(1.0, source.width * scale);
+        const double height = std::max(1.0, source.height * scale);
+        const double offset = effectiveOffset * static_cast<double>(backCount - backLayer + 1);
+        result[index] = {
+            front.centerX() - width * 0.5 + offset,
+            front.centerY() - height * 0.5 + offset,
+            width,
+            height,
+        };
+    }
+
+    return result;
 }
 
 const std::vector<SpatialPickKey>& spatialPickKeys() {

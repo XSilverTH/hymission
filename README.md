@@ -308,6 +308,9 @@ hl.config({
             hover_expand_scale = 1.18,
             overview_focus_follows_mouse = 1,
             show_focus_indicator = 0,
+            grouped_windows_policy = "expanded",
+            grouped_windows_collapsed_labels = 1,
+            grouped_windows_collapsed_scroll = 1,
 
             -- Animation: hover relayout
             hover_relayout_animation = "",
@@ -490,6 +493,21 @@ the non-scrolling axis and may overflow along the scrolling axis, so gesture
 panning moves the centered row or column. Both `hymission:scroll,layout` and Lua
 `scroll_move` can scroll the layout inside the niri overview; workspace switching
 continues to use `hl.plugin.hymission.gesture({ ..., action = "workspace" })`.
+
+### Grouped windows
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `grouped_windows_policy` | string | `expanded` | `expanded` shows every member of a Hyprland window group as a separate live preview. `collapsed` gives each group one stable overview slot bound to its current member. Unknown values fall back to `expanded`. |
+| `grouped_windows_collapsed_labels` | bool | `1` | In `collapsed` mode, draw an equal-width title tab for every group member. Clicking a tab changes the current member immediately without closing overview. |
+| `grouped_windows_collapsed_scroll` | bool | `1` | In `collapsed` mode, vertical scrolling over a grouped preview selects the previous or next member. The selection is committed immediately and remains after closing with `Escape`. |
+
+Hymission suppresses Hyprland's native groupbar only while overview is visible.
+In `expanded` mode, inactive group members ignore Hyprland's group-layout alpha
+inside overview while retaining their normal rule and fade opacity. Dragging any
+group member moves the whole group: all member previews shrink into a bounded
+stack under the pointer, then return together or animate into the target
+workspace thumbnail. Group order, membership, and lock state are preserved.
 
 ### Label picking
 

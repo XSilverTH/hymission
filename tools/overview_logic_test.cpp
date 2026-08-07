@@ -118,6 +118,28 @@ int main() {
     ok &= expect(parsePickLabelsMode("spatial") == PickLabelsMode::Spatial, "spatial pick-label mode should parse");
     ok &= expect(parsePickLabelsMode("SPATIAL") == PickLabelsMode::Spatial, "spatial pick-label mode should be case-insensitive");
     ok &= expect(parsePickLabelsMode("unknown") == PickLabelsMode::Sequential, "unknown pick-label modes should preserve sequential behavior");
+    ok &= expect(parseGroupedWindowsPolicy("expanded") == GroupedWindowsPolicy::Expanded, "expanded grouped-window policy should parse");
+    ok &= expect(parseGroupedWindowsPolicy(" COLLAPSED ") == GroupedWindowsPolicy::Collapsed, "collapsed grouped-window policy should trim and ignore case");
+    ok &= expect(parseGroupedWindowsPolicy("invalid") == GroupedWindowsPolicy::Expanded, "invalid grouped-window policy should fall back to expanded");
+    {
+        const std::vector<GroupProjectionInput> grouped = {{0, false}, {11, false}, {11, true}, {22, true}, {22, false}, {0, false}};
+        ok &= expect(projectGroupedWindowIndices(grouped, GroupedWindowsPolicy::Expanded) == std::vector<std::size_t>({0, 1, 2, 3, 4, 5}),
+                     "expanded grouped-window projection should preserve every candidate");
+        ok &= expect(projectGroupedWindowIndices(grouped, GroupedWindowsPolicy::Collapsed) == std::vector<std::size_t>({0, 2, 3, 5}),
+                     "collapsed grouped-window projection should keep standalone windows and one current member per group");
+    }
+    ok &= expect(hitTestEqualSegments({0, 0, 300, 30}, 3, 150, 15) == std::optional<std::size_t>{1}, "equal-segment hit testing should select the middle tab");
+    ok &= expect(!hitTestEqualSegments({0, 0, 300, 30}, 3, 301, 15), "equal-segment hit testing should reject points outside the bar");
+    {
+        const std::vector<Rect> groupRects = {{0, 0, 200, 100}, {300, 0, 100, 200}, {0, 300, 160, 120}};
+        const auto stack = stackedGroupPreviewRects(groupRects, 1, 500, 400, 0.5, 0.5, 0.65, 10.0, 12.0);
+        ok &= expect(stack.size() == 3 && closeEnough(stack[1].centerX(), 500) && closeEnough(stack[1].centerY(), 400),
+                     "group drag stack should keep the grabbed member under the pointer");
+        ok &= expect(closeEnough(stack[0].width, 130) && closeEnough(stack[2].height, 78), "group drag stack should scale every member uniformly");
+        ok &= expect(stack[0].x - (stack[1].centerX() - stack[0].width * 0.5) <= 12.0 &&
+                         stack[2].x - (stack[1].centerX() - stack[2].width * 0.5) <= 12.0,
+                     "group drag stack spread should stay within the configured cap");
+    }
     ok &= expect(spatialPickKeys().size() == 47, "spatial pick mode should expose the full physical ANSI alphanumeric and punctuation area");
 
     const auto spatialF = spatialPickKeyIndex('F');

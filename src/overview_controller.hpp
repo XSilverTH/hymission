@@ -13,6 +13,7 @@
 
 #include <hyprland/src/SharedDefs.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
+#include <hyprland/src/desktop/view/Group.hpp>
 #include <hyprland/src/devices/IKeyboard.hpp>
 #include <hyprland/src/devices/IPointer.hpp>
 #include <hyprland/src/devices/ITouch.hpp>
@@ -92,6 +93,7 @@ class OverviewController {
     void renderStage(eRenderStage stage);
     void handleMouseMove();
     bool handleMouseButton(const IPointer::SButtonEvent& event);
+    bool handleMouseAxis(const IPointer::SAxisEvent& event);
     void handleKeyboard(const IKeyboard::SKeyEvent& event, Event::SCallbackInfo& info);
     void handleWindowSetChange(PHLWINDOW window, WindowSetChangeKind kind = WindowSetChangeKind::General, bool preferDeferredRebuild = false);
     void handleWorkspaceChange(PHLWORKSPACE workspace);
@@ -99,6 +101,7 @@ class OverviewController {
     bool                shouldRenderWindowHook(const PHLWINDOW& window, const PHLMONITOR& monitor);
     void                borderDrawHook(void* borderDecorationThisptr, const PHLMONITOR& monitor, const float& alpha);
     void                shadowDrawHook(void* shadowDecorationThisptr, const PHLMONITOR& monitor, const float& alpha);
+    void                groupBarDrawHook(void* groupBarDecorationThisptr, const PHLMONITOR& monitor, const float& alpha);
     void                calculateUVForSurfaceHook(const PHLWINDOW& window, SP<CWLSurfaceResource> surface, const PHLMONITOR& monitor, bool main, const Vector2D& projSize,
                                                   const Vector2D& projSizeUnscaled, bool fixMisalignedFSV1);
     void                rendererDrawElementHook(void* rendererThisptr, WP<IPassElement> element, const CRegion& damage);
@@ -188,6 +191,11 @@ class OverviewController {
         bool         isFloating = false;
         bool         isPinned = false;
         bool         isNiriFloatingOverlay = false;
+        SP<Desktop::View::CGroup> group;
+        std::vector<PHLWINDOWREF> groupMembers;
+        std::size_t  groupCurrentIndex = 0;
+        bool         collapsedGroup = false;
+        bool         dragOnly = false;
     };
 
     struct WorkspaceStripEntry {
@@ -244,6 +252,23 @@ class OverviewController {
         double                                decorationScale = 1.0;
         bool                                  returning = false;
         std::chrono::steady_clock::time_point start = {};
+    };
+
+    struct GroupDragSession {
+        SP<Desktop::View::CGroup> group;
+        std::vector<PHLWINDOWREF> members;
+        std::vector<Rect>         sourceRects;
+        std::size_t               frontMember = 0;
+        double                    grabRatioX = 0.5;
+        double                    grabRatioY = 0.5;
+        bool                      injectedCollapsedMembers = false;
+        bool                      settling = false;
+        bool                      commitDrop = false;
+        bool                      completionScheduled = false;
+        PHLWORKSPACE              targetWorkspace;
+        std::vector<Rect>         settleFrom;
+        std::vector<Rect>         settleTo;
+        std::chrono::steady_clock::time_point settleStart = {};
     };
 
     struct SpatialPickCache {
@@ -490,6 +515,9 @@ class OverviewController {
     [[nodiscard]] bool         pickLabelsEnabled() const;
     [[nodiscard]] bool         pickLabelsShown() const;
     [[nodiscard]] PickLabelsMode pickLabelsMode() const;
+    [[nodiscard]] GroupedWindowsPolicy groupedWindowsPolicy() const;
+    [[nodiscard]] bool         collapsedGroupLabelsEnabled() const;
+    [[nodiscard]] bool         collapsedGroupScrollEnabled() const;
     [[nodiscard]] bool         pickLabelsDirectActivateEnabled() const;
     [[nodiscard]] double       focusHoverThickness() const;
     [[nodiscard]] double       focusSelectedThickness() const;
@@ -575,6 +603,7 @@ class OverviewController {
     [[nodiscard]] bool         ownsMonitor(const PHLMONITOR& monitor) const;
     [[nodiscard]] bool         ownsWorkspace(const PHLWORKSPACE& workspace) const;
     [[nodiscard]] bool         hasManagedWindow(const PHLWINDOW& window) const;
+    [[nodiscard]] bool         sameOverviewItem(const ManagedWindow& lhs, const ManagedWindow& rhs) const;
     [[nodiscard]] bool         isWindowClosePending(const PHLWINDOW& window) const;
     [[nodiscard]] bool         shouldApplyOverviewTransform(const PHLWINDOW& window) const;
     void                       markWindowClosePending(const PHLWINDOW& window);
@@ -667,6 +696,11 @@ class OverviewController {
     [[nodiscard]] PHLWORKSPACE               thumbnailWorkspaceAtPoint(double x, double y) const;
     [[nodiscard]] std::optional<DragPreviewTarget> draggedPreviewTargetFor(const PHLWINDOW& window) const;
     [[nodiscard]] std::optional<Rect>              draggedPreviewRectFor(const PHLWINDOW& window) const;
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> hitTestCollapsedGroupLabel(double x, double y) const;
+    [[nodiscard]] Rect collapsedGroupLabelBarRect(const ManagedWindow& managed) const;
+    bool switchCollapsedGroupMember(std::size_t windowIndex, std::size_t memberIndex, const char* source);
+    void beginGroupDrag(std::size_t windowIndex, const Vector2D& pointer);
+    void updateGroupDragSettlement();
     [[nodiscard]] double                           draggedPreviewTargetScaleForHover() const;
     [[nodiscard]] double                           draggedPreviewScale() const;
     [[nodiscard]] double                           dropAnimationProgress() const;
@@ -782,6 +816,7 @@ class OverviewController {
     [[nodiscard]] bool shouldHideLayerSurface(const PHLLS& layer, const PHLMONITOR& monitor) const;
     void renderBackdrop() const;
     void renderSelectionChrome() const;
+    void renderCollapsedGroupLabels() const;
     void renderDraggedWindowPreview() const;
     void captureDraggedWindowTexture();
     void refreshDraggedWindowCompositeTexture();
@@ -809,6 +844,7 @@ class OverviewController {
     CFunctionHook*            m_renderLayerHook = nullptr;
     CFunctionHook*            m_borderDrawHook = nullptr;
     CFunctionHook*            m_shadowDrawHook = nullptr;
+    CFunctionHook*            m_groupBarDrawHook = nullptr;
     CFunctionHook*            m_calculateUVForSurfaceHook = nullptr;
     CFunctionHook*            m_workspaceSwipeBeginFunctionHook = nullptr;
     CFunctionHook*            m_workspaceSwipeUpdateFunctionHook = nullptr;
@@ -832,6 +868,7 @@ class OverviewController {
     RenderLayerFn             m_renderLayerOriginal = nullptr;
     BorderDrawFn              m_borderDrawOriginal = nullptr;
     BorderDrawFn              m_shadowDrawOriginal = nullptr;
+    BorderDrawFn              m_groupBarDrawOriginal = nullptr;
     CalculateUVForSurfaceFn   m_calculateUVForSurfaceOriginal = nullptr;
     DispatcherHandler         m_fullscreenActiveOriginal;
     DispatcherHandler         m_fullscreenStateActiveOriginal;
@@ -923,12 +960,14 @@ class OverviewController {
     bool                     m_stripSnapshotRefreshScheduled = false;
     bool                     m_primaryButtonPressed = false;
     bool                     m_closeButtonPressLatched = false; // swallow release after close-button click
+    bool                     m_groupLabelPressLatched = false;
     bool                     m_closeCursorOverride = false;     // forcing the "pointer" cursor while hover
     std::optional<std::size_t> m_pressedStripIndex;
     std::optional<std::size_t>   m_pressedWindowIndex;
     std::optional<std::size_t>   m_draggedWindowIndex;
     std::optional<DragSettlement> m_dragSettlement;
     std::optional<DropAnimation>  m_dropAnimation;
+    std::optional<GroupDragSession> m_groupDragSession;
     SP<Render::IFramebuffer>      m_draggedWindowFramebuffer;
     SP<Render::ITexture>          m_draggedWindowTexture;
     bool                          m_draggedWindowCompositeCapture = false;
@@ -942,6 +981,7 @@ class OverviewController {
     double                    m_draggedWindowScaleFrom = 1.0;
     double                    m_draggedWindowTargetScale = 0.65;
     std::chrono::steady_clock::time_point m_draggedWindowStart = {};
+    std::chrono::steady_clock::time_point m_lastCollapsedGroupScroll = {};
     Vector2D                  m_hoverSelectionAnchorPointer;
     bool                      m_hoverSelectionAnchorValid = false;
     std::chrono::steady_clock::time_point m_hoverSelectionRetargetBlockedUntil = {};
@@ -955,6 +995,7 @@ class OverviewController {
     CHyprSignalListener       m_renderStageListener;
     CHyprSignalListener       m_mouseMoveListener;
     CHyprSignalListener       m_mouseButtonListener;
+    CHyprSignalListener       m_mouseAxisListener;
     CHyprSignalListener       m_touchDownListener;
     CHyprSignalListener       m_touchMotionListener;
     CHyprSignalListener       m_touchUpListener;
