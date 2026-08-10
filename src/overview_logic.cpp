@@ -399,6 +399,10 @@ float resolveExpandedGroupEffectiveAlpha(float originalAlpha, float previewAlpha
     return std::max(originalAlpha, previewAlpha);
 }
 
+bool shouldRefreshDraggedCompositeTexture(bool compositeCapture, bool textureAvailable) {
+    return compositeCapture && !textureAvailable;
+}
+
 Rect floatingSegmentBarRect(const Rect& preview, std::size_t count, double height, double gap, double minSegmentWidth,
                             double maxSegmentWidth, double horizontalInset) {
     if (count < 2 || preview.width <= 0.0 || preview.height <= 0.0)

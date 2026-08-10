@@ -162,6 +162,9 @@ int main() {
                  "ordinary overview windows should retain Hyprland's effective alpha");
     ok &= expect(closeEnough(resolveExpandedGroupEffectiveAlpha(0.35F, 0.72F, false, false, true, false), 0.35, 1e-6),
                  "normal desktop rendering should remain unchanged");
+    ok &= expect(shouldRefreshDraggedCompositeTexture(true, false), "multi-surface drag should capture its first composited frame");
+    ok &= expect(!shouldRefreshDraggedCompositeTexture(true, true), "multi-surface drag should keep its first composite rigid while moving");
+    ok &= expect(!shouldRefreshDraggedCompositeTexture(false, false), "single-surface drag should not enter the composite capture path");
     {
         const Rect preview = {100, 100, 900, 500};
         const Rect labels = floatingSegmentBarRect(preview, 2);

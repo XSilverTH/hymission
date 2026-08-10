@@ -3613,7 +3613,7 @@ bool OverviewController::shouldRenderWindowHook(const PHLWINDOW& window, const P
     // Single-surface windows use an independent texture and must be omitted
     // from the regular pass. Multi-surface windows stay visible long enough to
     // capture their fully composited pixels before the strip covers them.
-    if (!m_draggedWindowCompositeCapture && m_draggedWindowTexture && !m_stripPreviewContext.active && m_draggedWindowIndex &&
+    if (m_draggedWindowTexture && !m_stripPreviewContext.active && m_draggedWindowIndex &&
         *m_draggedWindowIndex < m_state.windows.size() &&
         m_state.windows[*m_draggedWindowIndex].window == window)
         return false;
@@ -12459,14 +12459,16 @@ void OverviewController::captureDraggedWindowTexture() {
 
     // Firefox/Zen can place visible browser content in child surfaces, and its
     // transparent chrome needs the already-composited desktop behind it. Keep
-    // the real transformed window in the main pass, then copy its final pixels
-    // immediately before the workspace strip is drawn.
+    // the real transformed window in the main pass for one frame, then retain
+    // that complete image as a rigid drag texture. Re-capturing from the moving
+    // destination each frame makes child surfaces drift inside the window.
     m_draggedWindowCompositeCapture = true;
     damageOwnedMonitors();
 }
 
 void OverviewController::refreshDraggedWindowCompositeTexture() {
-    if (!m_draggedWindowCompositeCapture || !m_draggedWindowIndex || *m_draggedWindowIndex >= m_state.windows.size() || !g_pHyprRenderer ||
+    if (!shouldRefreshDraggedCompositeTexture(m_draggedWindowCompositeCapture, static_cast<bool>(m_draggedWindowTexture)) || !m_draggedWindowIndex ||
+        *m_draggedWindowIndex >= m_state.windows.size() || !g_pHyprRenderer ||
         !g_pHyprOpenGL)
         return;
 

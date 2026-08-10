@@ -145,6 +145,7 @@ struct WindowExpansionTarget {
 [[nodiscard]] float                      resolveExpandedGroupEffectiveAlpha(float originalAlpha, float previewAlpha, bool overviewVisible,
                                                                            bool rawRenderActive, bool groupedOverviewItem,
                                                                            bool collapsedOverviewItem);
+[[nodiscard]] bool                       shouldRefreshDraggedCompositeTexture(bool compositeCapture, bool textureAvailable);
 [[nodiscard]] Rect                       floatingSegmentBarRect(const Rect& preview, std::size_t count, double height = 24.0,
                                                               double gap = 7.0, double minSegmentWidth = 56.0,
                                                               double maxSegmentWidth = 128.0, double horizontalInset = 8.0);
