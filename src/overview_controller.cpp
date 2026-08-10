@@ -2149,6 +2149,13 @@ bool hkShouldRenderWindow(void*, PHLWINDOW window, PHLMONITOR monitor) {
     return g_controller->shouldRenderWindowHook(window, monitor);
 }
 
+float hkEffectiveAlpha(void* windowThisptr) {
+    if (!g_controller)
+        return 0.0F;
+
+    return g_controller->effectiveAlphaHook(windowThisptr);
+}
+
 void hkRenderLayer(void* rendererThisptr, PHLLS layer, PHLMONITOR monitor, const Time::steady_tp& now, bool popups, bool lockscreen) {
     if (!g_controller)
         return;
@@ -2285,6 +2292,8 @@ OverviewController::~OverviewController() {
         HyprlandAPI::removeFunctionHook(m_handle, m_surfaceNeedsPrecomputeBlurHook);
     if (m_shouldRenderWindowHook)
         HyprlandAPI::removeFunctionHook(m_handle, m_shouldRenderWindowHook);
+    if (m_effectiveAlphaHook)
+        HyprlandAPI::removeFunctionHook(m_handle, m_effectiveAlphaHook);
     if (m_rendererDrawElementHook)
         HyprlandAPI::removeFunctionHook(m_handle, m_rendererDrawElementHook);
     if (m_borderDrawHook)
@@ -3635,6 +3644,38 @@ bool OverviewController::shouldRenderWindowHook(const PHLWINDOW& window, const P
     }
 
     return m_shouldRenderWindowOriginal(g_pHyprRenderer.get(), window, monitor);
+}
+
+float OverviewController::effectiveAlphaHook(void* windowThisptr) {
+    if (!m_effectiveAlphaOriginal)
+        return 0.0F;
+
+    const float originalAlpha = m_effectiveAlphaOriginal(windowThisptr);
+    if (!windowThisptr)
+        return originalAlpha;
+
+    const auto findInState = [&](const State& state) -> const ManagedWindow* {
+        const auto it = std::find_if(state.windows.begin(), state.windows.end(),
+                                     [&](const ManagedWindow& managed) { return managed.window && managed.window.get() == windowThisptr; });
+        return it == state.windows.end() ? nullptr : &*it;
+    };
+
+    const ManagedWindow* managed = nullptr;
+    if (m_stripPreviewContext.active) {
+        managed = findInState(m_stripPreviewContext.state);
+    } else if (m_workspaceTransition.active) {
+        managed = findInState(m_workspaceTransition.targetState);
+        if (!managed)
+            managed = findInState(m_workspaceTransition.sourceState);
+    }
+    if (!managed)
+        managed = findInState(m_state);
+
+    if (!managed || !managed->window || isWindowClosePending(managed->window))
+        return originalAlpha;
+
+    return resolveExpandedGroupEffectiveAlpha(originalAlpha, managed->previewAlpha, isVisible(), rawWindowRenderActive(),
+                                              static_cast<bool>(managed->group), managed->collapsedGroup);
 }
 
 bool OverviewController::shouldHideLayerSurface(const PHLLS& layer, const PHLMONITOR& monitor) const {
@@ -6785,6 +6826,12 @@ bool OverviewController::installHooks() {
         return false;
     }
 
+    if (!hookFunction("effectiveAlpha", "Desktop::View::CWindow::effectiveAlpha() const", m_effectiveAlphaHook,
+                      reinterpret_cast<void*>(&hkEffectiveAlpha))) {
+        notify("[hymission] failed to hook CWindow::effectiveAlpha for expanded groups", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
+        return false;
+    }
+
     (void)hookFunction("renderLayer", std::vector<std::string>{"IHyprRenderer::renderLayer(", "CHyprRenderer::renderLayer("}, m_renderLayerHook,
                        reinterpret_cast<void*>(&hkRenderLayer));
 
@@ -6883,6 +6930,7 @@ bool OverviewController::installHooks() {
     (void)hookFunction("end", "CScrollMoveTrackpadGesture::end(", m_scrollMoveGestureEndFunctionHook, reinterpret_cast<void*>(&hkScrollMoveGestureEnd));
 
     m_shouldRenderWindowOriginal = nullptr;
+    m_effectiveAlphaOriginal = nullptr;
     m_surfaceTexBoxOriginal = nullptr;
     m_surfaceBoundingBoxOriginal = nullptr;
     m_surfaceOpaqueRegionOriginal = nullptr;
@@ -6927,17 +6975,19 @@ bool OverviewController::activateHooks() {
     if (m_hooksActive)
         return true;
 
-    if (!m_shouldRenderWindowHook || !m_surfaceTexBoxHook || !m_surfaceBoundingBoxHook || !m_surfaceOpaqueRegionHook || !m_surfaceVisibleRegionHook ||
+    if (!m_shouldRenderWindowHook || !m_effectiveAlphaHook || !m_surfaceTexBoxHook || !m_surfaceBoundingBoxHook || !m_surfaceOpaqueRegionHook || !m_surfaceVisibleRegionHook ||
         !m_surfaceDrawHook || !m_surfaceNeedsLiveBlurHook || !m_surfaceNeedsPrecomputeBlurHook || !m_borderDrawHook || !m_shadowDrawHook || !m_calculateUVForSurfaceHook)
         return false;
 
-    const bool hooked = m_shouldRenderWindowHook->hook() && m_surfaceTexBoxHook->hook() && m_surfaceBoundingBoxHook->hook() && m_surfaceOpaqueRegionHook->hook() &&
-        m_surfaceVisibleRegionHook->hook() && m_surfaceDrawHook->hook() && m_surfaceNeedsLiveBlurHook->hook() && m_surfaceNeedsPrecomputeBlurHook->hook() &&
-        m_borderDrawHook->hook() && m_shadowDrawHook->hook() && m_calculateUVForSurfaceHook->hook();
+    const bool hooked = m_shouldRenderWindowHook->hook() && m_effectiveAlphaHook->hook() && m_surfaceTexBoxHook->hook() && m_surfaceBoundingBoxHook->hook() &&
+        m_surfaceOpaqueRegionHook->hook() && m_surfaceVisibleRegionHook->hook() && m_surfaceDrawHook->hook() && m_surfaceNeedsLiveBlurHook->hook() &&
+        m_surfaceNeedsPrecomputeBlurHook->hook() && m_borderDrawHook->hook() && m_shadowDrawHook->hook() && m_calculateUVForSurfaceHook->hook();
     if (!hooked) {
         notify("[hymission] surface pass hook attach failed", CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
         if (m_shouldRenderWindowHook)
             m_shouldRenderWindowHook->unhook();
+        if (m_effectiveAlphaHook)
+            m_effectiveAlphaHook->unhook();
         if (m_surfaceTexBoxHook)
             m_surfaceTexBoxHook->unhook();
         if (m_surfaceBoundingBoxHook)
@@ -6962,6 +7012,7 @@ bool OverviewController::activateHooks() {
     }
 
     m_shouldRenderWindowOriginal = reinterpret_cast<ShouldRenderWindowFn>(m_shouldRenderWindowHook->m_original);
+    m_effectiveAlphaOriginal = reinterpret_cast<EffectiveAlphaFn>(m_effectiveAlphaHook->m_original);
     m_surfaceTexBoxOriginal = reinterpret_cast<SurfaceGetTexBoxFn>(m_surfaceTexBoxHook->m_original);
     m_surfaceBoundingBoxOriginal = reinterpret_cast<SurfaceBoundingBoxFn>(m_surfaceBoundingBoxHook->m_original);
     m_surfaceOpaqueRegionOriginal = reinterpret_cast<SurfaceOpaqueRegionFn>(m_surfaceOpaqueRegionHook->m_original);
@@ -7004,6 +7055,8 @@ void OverviewController::deactivateHooks() {
 
     if (m_shouldRenderWindowHook)
         m_shouldRenderWindowHook->unhook();
+    if (m_effectiveAlphaHook)
+        m_effectiveAlphaHook->unhook();
     if (m_rendererDrawElementHook)
         m_rendererDrawElementHook->unhook();
     if (m_renderLayerHook)
@@ -7029,6 +7082,7 @@ void OverviewController::deactivateHooks() {
     if (m_calculateUVForSurfaceHook)
         m_calculateUVForSurfaceHook->unhook();
     m_shouldRenderWindowOriginal = nullptr;
+    m_effectiveAlphaOriginal = nullptr;
     m_surfaceTexBoxOriginal = nullptr;
     m_surfaceBoundingBoxOriginal = nullptr;
     m_surfaceOpaqueRegionOriginal = nullptr;

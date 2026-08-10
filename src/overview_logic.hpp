@@ -142,6 +142,9 @@ struct WindowExpansionTarget {
 [[nodiscard]] std::optional<std::size_t> hitTestEqualSegments(const Rect& bounds, std::size_t count, double x, double y);
 [[nodiscard]] bool                       shouldSuppressCollapsedGroupMember(std::uintptr_t itemGroupId, std::uintptr_t windowGroupId,
                                                                           std::uintptr_t boundWindowId, std::uintptr_t windowId);
+[[nodiscard]] float                      resolveExpandedGroupEffectiveAlpha(float originalAlpha, float previewAlpha, bool overviewVisible,
+                                                                           bool rawRenderActive, bool groupedOverviewItem,
+                                                                           bool collapsedOverviewItem);
 [[nodiscard]] Rect                       floatingSegmentBarRect(const Rect& preview, std::size_t count, double height = 24.0,
                                                               double gap = 7.0, double minSegmentWidth = 56.0,
                                                               double maxSegmentWidth = 128.0, double horizontalInset = 8.0);

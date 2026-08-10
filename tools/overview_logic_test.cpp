@@ -152,6 +152,16 @@ int main() {
     ok &= expect(shouldSuppressCollapsedGroupMember(11, 11, 101, 102), "collapsed group siblings should stay out of the normal render pass");
     ok &= expect(!shouldSuppressCollapsedGroupMember(11, 11, 101, 101), "the collapsed group member bound to the overview item should render");
     ok &= expect(!shouldSuppressCollapsedGroupMember(11, 22, 101, 102), "members of another group should remain unaffected");
+    ok &= expect(closeEnough(resolveExpandedGroupEffectiveAlpha(0.0F, 0.72F, true, false, true, false), 0.72, 1e-6),
+                 "expanded grouped windows should bypass Hyprland's zero effective-alpha render gate");
+    ok &= expect(closeEnough(resolveExpandedGroupEffectiveAlpha(0.0F, 0.72F, true, false, true, true), 0.0, 1e-6),
+                 "collapsed grouped windows should retain Hyprland's effective alpha");
+    ok &= expect(closeEnough(resolveExpandedGroupEffectiveAlpha(0.0F, 0.72F, true, true, true, false), 0.0, 1e-6),
+                 "raw snapshots should retain Hyprland's effective alpha");
+    ok &= expect(closeEnough(resolveExpandedGroupEffectiveAlpha(0.35F, 0.72F, true, false, false, false), 0.35, 1e-6),
+                 "ordinary overview windows should retain Hyprland's effective alpha");
+    ok &= expect(closeEnough(resolveExpandedGroupEffectiveAlpha(0.35F, 0.72F, false, false, true, false), 0.35, 1e-6),
+                 "normal desktop rendering should remain unchanged");
     {
         const Rect preview = {100, 100, 900, 500};
         const Rect labels = floatingSegmentBarRect(preview, 2);

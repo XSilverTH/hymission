@@ -391,6 +391,14 @@ bool shouldSuppressCollapsedGroupMember(std::uintptr_t itemGroupId, std::uintptr
     return itemGroupId != 0 && windowGroupId == itemGroupId && boundWindowId != 0 && windowId != 0 && windowId != boundWindowId;
 }
 
+float resolveExpandedGroupEffectiveAlpha(float originalAlpha, float previewAlpha, bool overviewVisible, bool rawRenderActive,
+                                         bool groupedOverviewItem, bool collapsedOverviewItem) {
+    if (!overviewVisible || rawRenderActive || !groupedOverviewItem || collapsedOverviewItem)
+        return originalAlpha;
+
+    return std::max(originalAlpha, previewAlpha);
+}
+
 Rect floatingSegmentBarRect(const Rect& preview, std::size_t count, double height, double gap, double minSegmentWidth,
                             double maxSegmentWidth, double horizontalInset) {
     if (count < 2 || preview.width <= 0.0 || preview.height <= 0.0)

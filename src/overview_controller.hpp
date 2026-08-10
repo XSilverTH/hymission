@@ -99,6 +99,7 @@ class OverviewController {
     void handleWorkspaceChange(PHLWORKSPACE workspace);
     void handleMonitorChange(PHLMONITOR monitor);
     bool                shouldRenderWindowHook(const PHLWINDOW& window, const PHLMONITOR& monitor);
+    float               effectiveAlphaHook(void* windowThisptr);
     void                borderDrawHook(void* borderDecorationThisptr, const PHLMONITOR& monitor, const float& alpha);
     void                shadowDrawHook(void* shadowDecorationThisptr, const PHLMONITOR& monitor, const float& alpha);
     void                groupBarDrawHook(void* groupBarDecorationThisptr, const PHLMONITOR& monitor, const float& alpha);
@@ -471,6 +472,7 @@ class OverviewController {
     using SurfaceDrawFn = std::vector<UP<IPassElement>> (*)(void*);
     using SurfaceBlurNeedsFn = bool (*)(void*);
     using ShouldRenderWindowFn = bool (*)(void*, PHLWINDOW, PHLMONITOR);
+    using EffectiveAlphaFn = float (*)(void*);
     using RendererDrawElementFn = void (*)(void*, WP<IPassElement>, const CRegion&);
     using RenderLayerFn = void (*)(void*, PHLLS, PHLMONITOR, const Time::steady_tp&, bool, bool);
     using BorderDrawFn = void (*)(void*, PHLMONITOR, const float&);
@@ -845,6 +847,7 @@ class OverviewController {
     CFunctionHook*            m_surfaceNeedsLiveBlurHook = nullptr;
     CFunctionHook*            m_surfaceNeedsPrecomputeBlurHook = nullptr;
     CFunctionHook*            m_shouldRenderWindowHook = nullptr;
+    CFunctionHook*            m_effectiveAlphaHook = nullptr;
     CFunctionHook*            m_rendererDrawElementHook = nullptr;
     CFunctionHook*            m_renderLayerHook = nullptr;
     CFunctionHook*            m_borderDrawHook = nullptr;
@@ -869,6 +872,7 @@ class OverviewController {
     SurfaceBlurNeedsFn        m_surfaceNeedsLiveBlurOriginal = nullptr;
     SurfaceBlurNeedsFn        m_surfaceNeedsPrecomputeBlurOriginal = nullptr;
     ShouldRenderWindowFn      m_shouldRenderWindowOriginal = nullptr;
+    EffectiveAlphaFn          m_effectiveAlphaOriginal = nullptr;
     RendererDrawElementFn     m_rendererDrawElementOriginal = nullptr;
     RenderLayerFn             m_renderLayerOriginal = nullptr;
     BorderDrawFn              m_borderDrawOriginal = nullptr;
