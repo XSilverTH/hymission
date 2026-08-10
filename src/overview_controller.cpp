@@ -12542,8 +12542,6 @@ void OverviewController::renderCollapsedGroupLabels() const {
             if (memberIndex == current) {
                 const Rect active = makeRect(segment.x + 2.0, segment.y + 2.0, std::max(1.0, segment.width - 4.0), std::max(1.0, segment.height - 4.0));
                 g_pHyprOpenGL->renderRect(toBox(active), colorWithAlphaMultiplier(focusSelectedColor(), progress * 0.24), {.round = std::max(3, outerRound - 2)});
-                const Rect accent = makeRect(segment.x + 9.0, segment.y + segment.height - 3.0, std::max(1.0, segment.width - 18.0), 2.0);
-                g_pHyprOpenGL->renderRect(toBox(accent), colorWithAlphaMultiplier(focusSelectedColor(), progress * 0.92), {.round = 1});
             } else if (memberIndex > 0) {
                 const Rect divider = makeRect(segment.x, segment.y + 6.0, 1.0, std::max(1.0, segment.height - 12.0));
                 g_pHyprOpenGL->renderRect(toBox(divider), colorWithAlphaMultiplier(focusTitleColor(), progress * 0.14), {});
