@@ -72,6 +72,25 @@ int main() {
     ok &= expect(!shouldApplyOverviewWindowTransform(true, true), "closing windows should leave overview transforms before close snapshots are captured");
     ok &= expect(!shouldApplyOverviewWindowTransform(false, false), "unmanaged windows should not receive overview transforms");
 
+    {
+        const auto followsMouse = resolveWindowExpansionTargets(1, 2, true, 1.25, 1.5);
+        ok &= expect(followsMouse.size() == 1 && followsMouse[0].index == 1 && closeEnough(followsMouse[0].scale, 1.25),
+                     "focus-follows-mouse should ignore hover expansion and use selected expansion only");
+
+        const auto independent = resolveWindowExpansionTargets(1, 2, false, 1.25, 1.5);
+        ok &= expect(independent.size() == 2 && independent[0].index == 1 && closeEnough(independent[0].scale, 1.25) &&
+                         independent[1].index == 2 && closeEnough(independent[1].scale, 1.5),
+                     "independent hover should expand selected and hovered windows separately");
+
+        const auto sameWindow = resolveWindowExpansionTargets(1, 1, false, 1.25, 1.5);
+        ok &= expect(sameWindow.size() == 1 && sameWindow[0].index == 1 && closeEnough(sameWindow[0].scale, 1.25),
+                     "the same selected and hovered window should use selected expansion without stacking scales");
+
+        const auto hoverOnly = resolveWindowExpansionTargets(std::nullopt, 2, false, 1.25, 1.5);
+        ok &= expect(hoverOnly.size() == 1 && hoverOnly[0].index == 2 && closeEnough(hoverOnly[0].scale, 1.5),
+                     "independent hover should work without a selected target");
+    }
+
     ok &= expect(computePickOrder(rects, {0, 0, 0, 0}) == std::vector<std::size_t>({0, 1, 2, 3}),
                  "pick order should read a single grid in row-major order");
     {

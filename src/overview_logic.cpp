@@ -739,6 +739,23 @@ double applyHoverRelayoutCurve(HoverRelayoutCurve curve, double t) {
     return easeOutCubic(t);
 }
 
+std::vector<WindowExpansionTarget> resolveWindowExpansionTargets(std::optional<std::size_t> selectedIndex,
+                                                                 std::optional<std::size_t> hoveredIndex,
+                                                                 bool overviewFocusFollowsMouse,
+                                                                 double selectedExpandScale,
+                                                                 double hoverExpandScale) {
+    std::vector<WindowExpansionTarget> targets;
+    targets.reserve(2);
+
+    if (selectedIndex)
+        targets.push_back({.index = *selectedIndex, .scale = std::max(1.0, selectedExpandScale)});
+
+    if (!overviewFocusFollowsMouse && hoveredIndex && hoveredIndex != selectedIndex)
+        targets.push_back({.index = *hoveredIndex, .scale = std::max(1.0, hoverExpandScale)});
+
+    return targets;
+}
+
 bool shouldSyncOverviewLiveFocus(bool handlesInput, bool overviewFocusFollowsMouse, long inputFollowMouseBeforeOpen) {
     return handlesInput && overviewFocusFollowsMouse && inputFollowMouseBeforeOpen != 0;
 }

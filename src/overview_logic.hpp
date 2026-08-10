@@ -124,6 +124,11 @@ struct GroupProjectionInput {
     bool           current = false;
 };
 
+struct WindowExpansionTarget {
+    std::size_t index = 0;
+    double      scale = 1.0;
+};
+
 [[nodiscard]] std::optional<std::size_t> hitTest(const std::vector<Rect>& rects, double x, double y);
 [[nodiscard]] std::optional<std::size_t> chooseDirectionalNeighbor(const std::vector<Rect>& rects, std::size_t currentIndex, Direction direction);
 [[nodiscard]] std::optional<std::size_t> chooseCyclicIndex(std::size_t count, std::size_t currentIndex, int step = 1);
@@ -159,6 +164,11 @@ struct GroupProjectionInput {
 [[nodiscard]] HoverRelayoutCurve         parseHoverRelayoutCurve(std::string_view value);
 [[nodiscard]] double                     applyHoverRelayoutCurve(HoverRelayoutCurve curve, double t);
 [[nodiscard]] bool                       shouldSyncOverviewLiveFocus(bool handlesInput, bool overviewFocusFollowsMouse, long inputFollowMouseBeforeOpen);
+[[nodiscard]] std::vector<WindowExpansionTarget> resolveWindowExpansionTargets(std::optional<std::size_t> selectedIndex,
+                                                                                std::optional<std::size_t> hoveredIndex,
+                                                                                bool overviewFocusFollowsMouse,
+                                                                                double selectedExpandScale,
+                                                                                double hoverExpandScale);
 [[nodiscard]] bool                       shouldApplyOverviewWindowTransform(bool managedByOverview, bool closePending);
 [[nodiscard]] RecommandVisibleGestureMode resolveRecommandVisibleGestureMode(int currentScopeSign, int gestureDirectionSign);
 [[nodiscard]] bool                       resolveOverviewGestureCommit(bool opening, double openness, double lastAlignedSpeed, double speedThreshold, bool cancelled);

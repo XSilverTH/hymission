@@ -2387,6 +2387,7 @@ bool OverviewController::initialize() {
             updateHoveredFromPointer(false, false, false, false, "monitor-focused");
     });
     m_configReloadedListener = events.config.reloaded.listen([this] {
+        warnAboutDeprecatedExpansionConfig();
         replaceNativeWorkspaceGestures("config-reloaded");
         if (isVisible())
             scheduleVisibleStateRebuild();
@@ -4444,7 +4445,7 @@ std::optional<OverviewController::ScopeOverride> OverviewController::parseScopeO
 bool OverviewController::expandSelectedWindowEnabled() const {
     if (m_state.engine == LayoutEngine::Thumbnail)
         return false;
-    return getConfigInt(m_handle, "plugin:hymission:expand_selected_window", 1) != 0;
+    return selectedExpandScale() > 1.001 || (!focusFollowsMouseEnabled() && hoverExpandScale() > 1.001);
 }
 
 std::string OverviewController::hoverRelayoutAnimationConfig() const {
@@ -4457,6 +4458,10 @@ double OverviewController::hoverRelayoutDurationMs() const {
 
 HoverRelayoutCurve OverviewController::hoverRelayoutCurve() const {
     return parseHoverRelayoutCurve(getConfigString(m_handle, "plugin:hymission:hover_relayout_curve", "ease_out_cubic"));
+}
+
+double OverviewController::selectedExpandScale() const {
+    return std::clamp(getConfigFloat(m_handle, "plugin:hymission:selected_expand_scale", SELECTED_WINDOW_LAYOUT_EMPHASIS), 1.0, 2.0);
 }
 
 double OverviewController::hoverExpandScale() const {
@@ -9705,20 +9710,43 @@ void OverviewController::flushQueuedRealFocusDuringOverview() {
     syncRealFocusDuringOverview(queuedTarget, syncScrollingSpot);
 }
 
-void OverviewController::updateSelectedWindowLayout(const PHLWINDOW& previousSelectedWindow) {
+void OverviewController::updateSelectedWindowLayout(const PHLWINDOW& previousSelectedWindow, PHLWINDOW expansionTarget,
+                                                    std::optional<double> expansionScale, bool preserveBaseTargets) {
     if (!expandSelectedWindowEnabled() || !isVisible() || m_state.phase != Phase::Active || m_gestureSession.active || m_workspaceTransition.active)
         return;
 
-    const auto currentSelection = selectedWindow();
-    const auto currentSelectedWindow = currentSelection ? currentSelection : Desktop::focusState()->window();
-    if (currentSelectedWindow == previousSelectedWindow)
+    if (!expansionTarget) {
+        const auto currentSelection = selectedWindow();
+        const auto currentSelectedWindow = currentSelection ? currentSelection : Desktop::focusState()->window();
+        const auto currentHoveredWindow = !focusFollowsMouseEnabled() && m_state.hoveredIndex && *m_state.hoveredIndex < m_state.windows.size() ?
+            m_state.windows[*m_state.hoveredIndex].window : PHLWINDOW{};
+        const auto previousLayoutSelectedWindow = m_lastLayoutSelectedWindow.lock();
+        const auto previousLayoutHoveredWindow = m_lastLayoutHoveredWindow.lock();
+        if (currentSelectedWindow == previousLayoutSelectedWindow && currentHoveredWindow == previousLayoutHoveredWindow)
+            return;
+
+        m_lastLayoutSelectedWindow = currentSelectedWindow;
+        m_lastLayoutHoveredWindow = currentHoveredWindow;
+
+        const auto expansionTargets = resolveWindowExpansionTargets(m_state.selectedIndex, m_state.hoveredIndex, focusFollowsMouseEnabled(),
+                                                                     selectedExpandScale(), hoverExpandScale());
+        bool preserveTargets = false;
+        for (const auto& target : expansionTargets) {
+            if (target.index >= m_state.windows.size())
+                continue;
+            updateSelectedWindowLayout(previousSelectedWindow, m_state.windows[target.index].window, target.scale, preserveTargets);
+            preserveTargets = true;
+        }
         return;
-    m_lastLayoutSelectedWindow = currentSelectedWindow;
+    }
+
+    const auto currentSelectedWindow = expansionTarget;
 
     if (debugLogsEnabled()) {
         std::ostringstream out;
-        out << "[hymission] expand-selected relayout previous=" << debugWindowLabel(previousSelectedWindow)
-            << " current=" << debugWindowLabel(currentSelectedWindow);
+        out << "[hymission] expand-target relayout previousSelected=" << debugWindowLabel(previousSelectedWindow)
+            << " target=" << debugWindowLabel(currentSelectedWindow)
+            << " requestedScale=" << expansionScale.value_or(selectedExpandScale());
         if (m_state.hoveredIndex && *m_state.hoveredIndex < m_state.windows.size())
             out << " hovered=" << *m_state.hoveredIndex << ":" << debugWindowLabel(m_state.windows[*m_state.hoveredIndex].window);
         else
@@ -9728,7 +9756,7 @@ void OverviewController::updateSelectedWindowLayout(const PHLWINDOW& previousSel
         else
             out << " selected=<null>";
         debugLog(out.str());
-        logOverviewLayoutState("before expand-selected relayout", m_state);
+        logOverviewLayoutState("before expand-target relayout", m_state);
     }
 
     m_hoverSelectionRetargetBlockedUntil =
@@ -9754,9 +9782,11 @@ void OverviewController::updateSelectedWindowLayout(const PHLWINDOW& previousSel
     baseTargets.reserve(m_state.windows.size());
     for (auto& managed : m_state.windows) {
         managed.relayoutFromGlobal = currentPreviewRect(managed);
-        if (managed.targetMonitor) {
+        // A second independent expansion starts from the first expansion's
+        // final targets, keeping selected and hovered previews enlarged.
+        if (!preserveBaseTargets && managed.targetMonitor) {
             managed.targetGlobal = overviewContentTargetForSlot(managed.window, managed.targetMonitor, managed.slot);
-        } else {
+        } else if (!preserveBaseTargets) {
             managed.targetGlobal = managed.relayoutFromGlobal;
         }
         baseTargets.push_back(managed.targetGlobal);
@@ -9789,7 +9819,7 @@ void OverviewController::updateSelectedWindowLayout(const PHLWINDOW& previousSel
     const double maxGrowthYPerSide = std::max(0.0, layoutConfig.rowSpacing * 2.0);
     const double scaleCapByGrowth = maxCenteredScaleForPerSideGrowth(selectedBase, maxGrowthXPerSide, maxGrowthYPerSide);
     const double scaleCapByBounds = maxCenteredScaleForBounds(selectedBase, boundsGlobal);
-    const double preferredScale = m_state.windows.size() <= 1 ? 1.0 : hoverExpandScale();
+    const double preferredScale = m_state.windows.size() <= 1 ? 1.0 : expansionScale.value_or(selectedExpandScale());
     const double scaleCap = std::max(1.0, std::min({preferredScale, scaleCapByGrowth, scaleCapByBounds}));
     const double rippleRadius =
         std::max(std::hypot(selectedBase.width, selectedBase.height) * 2.5, std::hypot(boundsGlobal.width, boundsGlobal.height) * 0.55);
@@ -10005,7 +10035,7 @@ void OverviewController::updateSelectedWindowLayout(const PHLWINDOW& previousSel
 
     if (debugLogsEnabled()) {
         std::ostringstream out;
-        out << "[hymission] expand-selected ripple push selected=" << debugWindowLabel(currentSelectedWindow)
+        out << "[hymission] expand-target ripple push target=" << debugWindowLabel(currentSelectedWindow)
             << " peers=" << peers.size()
             << " radius=" << rippleRadius
             << " scale=" << appliedScale
@@ -10020,7 +10050,7 @@ void OverviewController::updateSelectedWindowLayout(const PHLWINDOW& previousSel
 
     if (!shouldAnimateRelayout) {
         if (debugLogsEnabled())
-            debugLog("[hymission] expand-selected relayout skipped (in-place target unchanged)");
+            debugLog("[hymission] expand-target relayout skipped (in-place target unchanged)");
         return;
     }
 
@@ -10432,6 +10462,7 @@ void OverviewController::beginOpen(const PHLMONITOR& monitor, ScopeOverride requ
     clearPostCloseForcedFocus();
     clearPostCloseDispatcher();
     m_lastLayoutSelectedWindow.reset();
+    m_lastLayoutHoveredWindow.reset();
     m_queuedOverviewSelectionTarget.reset();
     m_queuedOverviewSelectionSyncScrollingSpot = false;
     m_queuedOverviewLiveFocusTarget.reset();
@@ -10837,6 +10868,7 @@ void OverviewController::deactivate() {
 
     clearPostCloseForcedFocus();
     m_lastLayoutSelectedWindow.reset();
+    m_lastLayoutHoveredWindow.reset();
     m_queuedOverviewSelectionTarget.reset();
     m_queuedOverviewSelectionSyncScrollingSpot = false;
     m_queuedOverviewLiveFocusTarget.reset();
@@ -11367,6 +11399,8 @@ void OverviewController::updateHoveredFromPointer(bool syncSelection, bool syncR
 
     if (previousHoveredStrip != m_state.hoveredStripIndex || previousHovered != m_state.hoveredIndex || previousSelected != m_state.selectedIndex ||
         previousFocus != m_state.focusDuringOverview) {
+        if (!draggingWindow && (previousHovered != m_state.hoveredIndex || previousSelected != m_state.selectedIndex))
+            updateSelectedWindowLayout({});
         if (draggingWindow && previousHoveredStrip != m_state.hoveredStripIndex) {
             m_stripSnapshotsDirty = true;
             scheduleWorkspaceStripSnapshotRefresh();
@@ -11890,6 +11924,19 @@ void OverviewController::activateStripTarget(std::size_t index) {
 
 void OverviewController::notify(const std::string& message, const CHyprColor& color, float durationMs) const {
     HyprlandAPI::addNotification(m_handle, message, color, durationMs);
+}
+
+void OverviewController::warnAboutDeprecatedExpansionConfig() {
+    if (m_deprecatedExpansionConfigWarned || !Config::mgr())
+        return;
+
+    const auto legacy = Config::mgr()->getConfigValue("plugin:hymission:expand_selected_window");
+    if (!legacy.setByUser)
+        return;
+
+    m_deprecatedExpansionConfigWarned = true;
+    notify("[hymission] expand_selected_window is ignored; use selected_expand_scale and hover_expand_scale",
+           CHyprColor(1.0, 0.7, 0.2, 1.0), 8000);
 }
 
 void OverviewController::debugLog(const std::string& message) const {
@@ -13732,9 +13779,6 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
     std::unordered_map<MONITORID, std::size_t> directNiriOverviewWindowsByMonitor;
     LayoutConfig config = layoutConfigForState(state);
     state.engine = config.engine;
-    const auto layoutEmphasisTarget =
-        config.engine == LayoutEngine::Thumbnail ? PHLWINDOW{} : (preferredSelectedWindow ? preferredSelectedWindow : focusedWindow);
-    const double selectedLayoutEmphasis = layoutEmphasisTarget ? hoverExpandScale() : 1.0;
     const bool useWorkspaceRows = workspaceRowsEnabled(m_handle) || config.engine == LayoutEngine::Thumbnail;
     config.preserveInputOrder = preserveExistingOrder || orderByRecentUse;
     config.forceRowGroups = useWorkspaceRows;
@@ -13937,7 +13981,10 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
                 },
             .label = window->m_title,
             .rowGroup = rowGroupForWindow(window),
-            .layoutEmphasis = window == layoutEmphasisTarget ? selectedLayoutEmphasis : 1.0,
+            // Expansion is applied after the stable base layout is computed.
+            // Keeping slots un-emphasized prevents the initial selection from
+            // remaining enlarged after selection moves elsewhere.
+            .layoutEmphasis = 1.0,
         });
     }
 

@@ -325,10 +325,13 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     FLOAT_CONF("natural_scale_flex", 0.22F);
     FLOAT_CONF("layout_scale_weight", 1.0F);
     FLOAT_CONF("layout_space_weight", 0.10F);
-    INT_CONF("expand_selected_window", 1);
+    // Deprecated compatibility sink. It remains registered to avoid a config
+    // parse error, but the controller ignores it and shows a migration notice.
+    INT_CONF("expand_selected_window", 0);
     STRING_CONF("hover_relayout_animation", "");
     FLOAT_CONF("hover_relayout_duration", 140.0F);
     STRING_CONF("hover_relayout_curve", "ease_out_cubic");
+    FLOAT_CONF("selected_expand_scale", 1.18F);
     FLOAT_CONF("hover_expand_scale", 1.18F);
     INT_CONF("overview_focus_follows_mouse", 1);
     INT_CONF("multi_workspace_sort_recent_first", 1);

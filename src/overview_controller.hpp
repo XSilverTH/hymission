@@ -494,6 +494,7 @@ class OverviewController {
     [[nodiscard]] std::string  hoverRelayoutAnimationConfig() const;
     [[nodiscard]] double       hoverRelayoutDurationMs() const;
     [[nodiscard]] HoverRelayoutCurve hoverRelayoutCurve() const;
+    [[nodiscard]] double       selectedExpandScale() const;
     [[nodiscard]] double       hoverExpandScale() const;
     [[nodiscard]] bool         focusFollowsMouseEnabled() const;
     [[nodiscard]] bool         multiWorkspaceSortRecentFirstEnabled() const;
@@ -742,7 +743,8 @@ class OverviewController {
     void                       flushQueuedSelectionRetargetDuringOverview();
     void                       queueRealFocusDuringOverview(const PHLWINDOW& window, bool syncScrollingSpot = true, const char* source = "?");
     void                       flushQueuedRealFocusDuringOverview();
-    void                       updateSelectedWindowLayout(const PHLWINDOW& previousSelectedWindow);
+    void                       updateSelectedWindowLayout(const PHLWINDOW& previousSelectedWindow, PHLWINDOW expansionTarget = {},
+                                                          std::optional<double> expansionScale = std::nullopt, bool preserveBaseTargets = false);
     void                       clearPendingWindowGeometryRetry();
     void                       scheduleVisibleStateRebuild();
     void                       scheduleWorkspaceChangeHandling(const PHLWORKSPACE& workspace, OverviewWorkspaceChangeAction action, bool allowExternalTransition = false);
@@ -782,6 +784,7 @@ class OverviewController {
     void               clearSpatialPickCache();
     [[nodiscard]] const SpatialPickMap& spatialPickMapForCurrentState() const;
     void notify(const std::string& message, const CHyprColor& color, float durationMs) const;
+    void warnAboutDeprecatedExpansionConfig();
     void debugLog(const std::string& message) const;
     void debugSurfaceLog(const std::string& message) const;
     [[nodiscard]] std::string debugWorkspaceLabel(const PHLWORKSPACE& workspace) const;
@@ -910,6 +913,8 @@ class OverviewController {
     bool                      m_deactivateScheduled = false;
     std::size_t               m_surfaceRenderDataTransformDepth = 0;
     PHLWINDOWREF              m_lastLayoutSelectedWindow;
+    PHLWINDOWREF              m_lastLayoutHoveredWindow;
+    bool                      m_deprecatedExpansionConfigWarned = false;
     PHLWINDOWREF              m_queuedOverviewSelectionTarget;
     bool                      m_queuedOverviewSelectionSyncScrollingSpot = false;
     PHLWINDOWREF              m_queuedOverviewLiveFocusTarget;

@@ -304,7 +304,7 @@ hl.config({
             workspace_change_keeps_overview = 1,
 
             -- Behavior: hover and selection
-            expand_selected_window = 1,
+            selected_expand_scale = 1.18,
             hover_expand_scale = 1.18,
             overview_focus_follows_mouse = 1,
             show_focus_indicator = 0,
@@ -442,9 +442,10 @@ overview-to-overview transition path.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `expand_selected_window` | bool | `1` | Enlarge the selected preview and push nearby previews away without reshuffling the whole overview grid. Uses the overview-selected target, which usually follows hover when `overview_focus_follows_mouse = 1`. |
-| `hover_expand_scale` | float | `1.18` | Preferred selected-preview scale multiplier used by `expand_selected_window`. Values are clamped to `1.0` - `2.0`, and layout bounds may cap the visible result. |
-| `overview_focus_follows_mouse` | bool | `1` | Keep the overview selection aligned with hover, and sync real focus when allowed. Hover retargeting is frame-coalesced for smoother animation, and multi-workspace overview stays visually anchored when real focus crosses workspaces. |
+| `selected_expand_scale` | float | `1.18` | Selected-preview scale multiplier. Values are clamped to `1.0` - `2.0`; `1.0` disables selected expansion, and layout bounds may cap the visible result. |
+| `hover_expand_scale` | float | `1.18` | Independently hovered-preview scale multiplier when `overview_focus_follows_mouse = 0`. Values are clamped to `1.0` - `2.0`; `1.0` disables hover expansion. It is ignored when focus follows the mouse. |
+| `overview_focus_follows_mouse` | bool | `1` | Keep the overview selection aligned with hover and sync real focus when allowed. When enabled, hover uses `selected_expand_scale` through the updated selection and `hover_expand_scale` is ignored. When disabled, different selected and hovered previews may be enlarged at the same time. |
+| `expand_selected_window` | bool | `0` | Deprecated compatibility key. It is accepted to avoid a config error but ignored, and an on-screen migration notice asks the user to switch to `selected_expand_scale` / `hover_expand_scale`. |
 | `show_focus_indicator` | bool | `0` | Render selected and hovered preview focus chrome. |
 
 #### Toggle switch behavior
