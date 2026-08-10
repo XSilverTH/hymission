@@ -619,6 +619,8 @@ class OverviewController {
     [[nodiscard]] Rect         overviewContentRectForMonitor(const PHLMONITOR& monitor, const State& state) const;
     [[nodiscard]] std::vector<Rect> stripRects() const;
     [[nodiscard]] const ManagedWindow* managedWindowFor(const State& state, const PHLWINDOW& window, bool includeTransient = false) const;
+    [[nodiscard]] const ManagedWindow* collapsedOverviewItemFor(const State& state, const PHLWINDOW& window) const;
+    [[nodiscard]] const ManagedWindow* collapsedOverviewItemFor(const PHLWINDOW& window) const;
     [[nodiscard]] const ManagedWindow* managedWindowForWorkspaceTransition(const PHLWINDOW& window) const;
     [[nodiscard]] const ManagedWindow* managedWindowFor(const PHLWINDOW& window) const;
     [[nodiscard]] PHLWINDOW     selectedWindow() const;

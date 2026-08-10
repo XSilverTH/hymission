@@ -3587,6 +3587,19 @@ bool OverviewController::shouldRenderWindowHook(const PHLWINDOW& window, const P
     if (isWindowClosePending(window))
         return m_shouldRenderWindowOriginal(g_pHyprRenderer.get(), window, monitor);
 
+    // A collapsed group has one overview item even while Hyprland is changing
+    // its real current member. Keep every sibling except the item binding out
+    // of the normal pass so the old member cannot flash at desktop geometry.
+    if (isVisible() && window && monitor && ownsMonitor(monitor)) {
+        const auto* collapsed = collapsedOverviewItemFor(window);
+        if (collapsed && collapsed->targetMonitor == monitor &&
+            shouldSuppressCollapsedGroupMember(reinterpret_cast<std::uintptr_t>(collapsed->group.get()),
+                                                reinterpret_cast<std::uintptr_t>(window->m_group.get()),
+                                                reinterpret_cast<std::uintptr_t>(collapsed->window.get()),
+                                                reinterpret_cast<std::uintptr_t>(window.get())))
+            return false;
+    }
+
     // Single-surface windows use an independent texture and must be omitted
     // from the regular pass. Multi-surface windows stay visible long enough to
     // capture their fully composited pixels before the strip covers them.
@@ -7507,6 +7520,30 @@ const OverviewController::ManagedWindow* OverviewController::managedWindowFor(co
     const auto transientIt =
         std::find_if(state.transientClosingWindows.begin(), state.transientClosingWindows.end(), [&](const ManagedWindow& managed) { return managed.window == window; });
     return transientIt == state.transientClosingWindows.end() ? nullptr : &*transientIt;
+}
+
+const OverviewController::ManagedWindow* OverviewController::collapsedOverviewItemFor(const State& state, const PHLWINDOW& window) const {
+    if (!window || !window->m_group)
+        return nullptr;
+
+    const auto it = std::find_if(state.windows.begin(), state.windows.end(), [&](const ManagedWindow& managed) {
+        return managed.collapsedGroup && managed.group && managed.group == window->m_group && managed.group->has(window);
+    });
+    return it == state.windows.end() ? nullptr : &*it;
+}
+
+const OverviewController::ManagedWindow* OverviewController::collapsedOverviewItemFor(const PHLWINDOW& window) const {
+    if (m_stripPreviewContext.active)
+        return collapsedOverviewItemFor(m_stripPreviewContext.state, window);
+
+    if (m_workspaceTransition.active) {
+        if (const auto* managed = collapsedOverviewItemFor(m_workspaceTransition.targetState, window))
+            return managed;
+        if (const auto* managed = collapsedOverviewItemFor(m_workspaceTransition.sourceState, window))
+            return managed;
+    }
+
+    return collapsedOverviewItemFor(m_state, window);
 }
 
 const OverviewController::ManagedWindow* OverviewController::managedWindowForWorkspaceTransition(const PHLWINDOW& window) const {
@@ -12357,8 +12394,8 @@ Rect OverviewController::collapsedGroupLabelBarRect(const ManagedWindow& managed
         return {};
 
     const Rect preview = currentPreviewRect(managed);
-    const double height = std::clamp(preview.height * 0.14, 18.0, 30.0);
-    return makeRect(preview.x, preview.y, preview.width, std::min(height, preview.height));
+    const double height = std::clamp(preview.height * 0.06, 20.0, 26.0);
+    return floatingSegmentBarRect(preview, managed.groupMembers.size(), height);
 }
 
 std::optional<std::pair<std::size_t, std::size_t>> OverviewController::hitTestCollapsedGroupLabel(double x, double y) const {
@@ -12383,18 +12420,34 @@ bool OverviewController::switchCollapsedGroupMember(std::size_t windowIndex, std
     if (!managed.collapsedGroup || !managed.group || memberIndex >= managed.group->size())
         return false;
 
-    const auto member = managed.group->fromIndex(memberIndex);
+    const auto group = managed.group;
+    const auto member = group->fromIndex(memberIndex);
     if (!member || !member->m_isMapped)
         return false;
 
-    managed.group->setCurrent(memberIndex);
+    if (managed.window == member && group->current() == member)
+        return true;
+
+    // Bind the overview item before changing Hyprland's real group current.
+    // setCurrent() damages windows, flips WINDOW_ALPHA_LAYOUT, refreshes
+    // decorations, and may change focus synchronously. With the target already
+    // bound, those callbacks can only render it at the existing overview slot.
+    const ManagedWindow previous = managed;
     managed.window = member;
     managed.title = member->m_title;
-    managed.groupMembers = managed.group->windows();
-    managed.groupCurrentIndex = managed.group->getCurrentIdx();
-    managed.previewAlpha = overviewPreviewAlphaForWindow(member);
+    managed.groupMembers = group->windows();
+    managed.groupCurrentIndex = memberIndex;
+    managed.previewAlpha = overviewPreviewAlphaForWindow(member, true);
     managed.isFloating = member->m_isFloating;
     managed.isPinned = member->m_pinned;
+
+    group->setCurrent(memberIndex);
+    if (group->current() != member) {
+        managed = previous;
+        return false;
+    }
+    managed.groupCurrentIndex = group->getCurrentIdx();
+
     if (m_state.selectedIndex && *m_state.selectedIndex == windowIndex)
         m_state.focusDuringOverview = member;
     if (m_state.pendingExitFocus && managed.group->has(m_state.pendingExitFocus))
@@ -12432,18 +12485,28 @@ void OverviewController::renderCollapsedGroupLabels() const {
         if (segmentWidth < 2.0)
             continue;
 
+        const int outerRound = std::max(4, static_cast<int>(std::lround(scaleLengthForRender(monitor, 8.0))));
+        g_pHyprOpenGL->renderRect(toBox(bar), colorWithAlphaMultiplier(closeButtonColor(), progress * 0.94), {.round = outerRound});
+
         const std::size_t current = managed.group ? managed.group->getCurrentIdx() : managed.groupCurrentIndex;
         for (std::size_t memberIndex = 0; memberIndex < managed.groupMembers.size(); ++memberIndex) {
             const auto member = managed.groupMembers[memberIndex].lock();
             const Rect segment = makeRect(bar.x + segmentWidth * static_cast<double>(memberIndex), bar.y, segmentWidth, bar.height);
-            const CHyprColor fill = colorWithAlphaMultiplier(memberIndex == current ? focusSelectedColor() : closeButtonColor(), progress * (memberIndex == current ? 0.82 : 0.68));
-            g_pHyprOpenGL->renderRect(toBox(segment), fill, {.round = memberIndex == 0 || memberIndex + 1 == managed.groupMembers.size() ? 4 : 0});
+            if (memberIndex == current) {
+                const Rect active = makeRect(segment.x + 2.0, segment.y + 2.0, std::max(1.0, segment.width - 4.0), std::max(1.0, segment.height - 4.0));
+                g_pHyprOpenGL->renderRect(toBox(active), colorWithAlphaMultiplier(focusSelectedColor(), progress * 0.24), {.round = std::max(3, outerRound - 2)});
+                const Rect accent = makeRect(segment.x + 9.0, segment.y + segment.height - 3.0, std::max(1.0, segment.width - 18.0), 2.0);
+                g_pHyprOpenGL->renderRect(toBox(accent), colorWithAlphaMultiplier(focusSelectedColor(), progress * 0.92), {.round = 1});
+            } else if (memberIndex > 0) {
+                const Rect divider = makeRect(segment.x, segment.y + 6.0, 1.0, std::max(1.0, segment.height - 12.0));
+                g_pHyprOpenGL->renderRect(toBox(divider), colorWithAlphaMultiplier(focusTitleColor(), progress * 0.14), {});
+            }
 
             const std::string title = member && !member->m_title.empty() ? member->m_title : std::to_string(memberIndex + 1);
-            const double pad = scaleLengthForRender(monitor, 4.0);
+            const double pad = scaleLengthForRender(monitor, 8.0);
             const int maxWidth = std::max(1, static_cast<int>(std::floor(segment.width - pad * 2.0)));
-            auto texture = g_pHyprRenderer->renderText(title, colorWithAlphaMultiplier(focusTitleColor(), progress),
-                                                       scaleFontSizeForRender(monitor, std::clamp(barGlobal.height * 0.48, 9.0, 13.0)), false, "", maxWidth);
+            auto texture = g_pHyprRenderer->renderText(title, colorWithAlphaMultiplier(focusTitleColor(), progress * (memberIndex == current ? 1.0 : 0.66)),
+                                                       scaleFontSizeForRender(monitor, std::clamp(barGlobal.height * 0.44, 9.0, 11.5)), false, "", maxWidth);
             if (!texture)
                 continue;
             const Rect textRect = makeRect(segment.x + pad, segment.y + (segment.height - texture->m_size.y) * 0.5,
@@ -13402,7 +13465,7 @@ void OverviewController::buildWorkspaceStripEntries(State& state) const {
 
         const bool useGoalGeometry = shouldUseGoalGeometryForStateSnapshot(window);
         const auto naturalGlobal = stateSnapshotGlobalRectForWindow(window, useGoalGeometry);
-        const auto previewAlpha = overviewPreviewAlphaForWindow(window, groupPolicy == GroupedWindowsPolicy::Expanded);
+        const auto previewAlpha = overviewPreviewAlphaForWindow(window, static_cast<bool>(window->m_group));
         const auto targetMonitor = preferredMonitorForWindow(window, state);
 
         for (auto& entry : state.stripEntries) {
@@ -13832,7 +13895,7 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
             .title = window->m_title,
             .naturalGlobal = directNiriSlot ? directNiriSourceGlobal : naturalGlobal,
             .exitGlobal = directNiriSlot ? directNiriSourceGlobal : naturalGlobal,
-            .previewAlpha = overviewPreviewAlphaForWindow(window, groupPolicy == GroupedWindowsPolicy::Expanded),
+            .previewAlpha = overviewPreviewAlphaForWindow(window, static_cast<bool>(window->m_group)),
             .isFloating = window->m_isFloating,
             .isPinned = window->m_pinned,
             .isNiriFloatingOverlay = directNiriFloatingOverlay,

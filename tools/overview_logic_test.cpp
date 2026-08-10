@@ -130,6 +130,18 @@ int main() {
     }
     ok &= expect(hitTestEqualSegments({0, 0, 300, 30}, 3, 150, 15) == std::optional<std::size_t>{1}, "equal-segment hit testing should select the middle tab");
     ok &= expect(!hitTestEqualSegments({0, 0, 300, 30}, 3, 301, 15), "equal-segment hit testing should reject points outside the bar");
+    ok &= expect(shouldSuppressCollapsedGroupMember(11, 11, 101, 102), "collapsed group siblings should stay out of the normal render pass");
+    ok &= expect(!shouldSuppressCollapsedGroupMember(11, 11, 101, 101), "the collapsed group member bound to the overview item should render");
+    ok &= expect(!shouldSuppressCollapsedGroupMember(11, 22, 101, 102), "members of another group should remain unaffected");
+    {
+        const Rect preview = {100, 100, 900, 500};
+        const Rect labels = floatingSegmentBarRect(preview, 2);
+        ok &= expect(closeEnough(labels.centerX(), preview.centerX()) && closeEnough(labels.width, 256),
+                     "collapsed group labels should use a compact centered width");
+        ok &= expect(labels.y + labels.height <= preview.y, "collapsed group labels should not cover the preview decoration");
+        const Rect crowded = floatingSegmentBarRect({0, 100, 240, 120}, 8);
+        ok &= expect(crowded.width <= 224 && crowded.x >= 8, "crowded collapsed group labels should stay inside the preview width");
+    }
     {
         const std::vector<Rect> groupRects = {{0, 0, 200, 100}, {300, 0, 100, 200}, {0, 300, 160, 120}};
         const auto stack = stackedGroupPreviewRects(groupRects, 1, 500, 400, 0.5, 0.5, 0.65, 10.0, 12.0);

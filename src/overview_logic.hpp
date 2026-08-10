@@ -135,6 +135,11 @@ struct GroupProjectionInput {
 [[nodiscard]] GroupedWindowsPolicy       parseGroupedWindowsPolicy(std::string_view value);
 [[nodiscard]] std::vector<std::size_t>   projectGroupedWindowIndices(const std::vector<GroupProjectionInput>& inputs, GroupedWindowsPolicy policy);
 [[nodiscard]] std::optional<std::size_t> hitTestEqualSegments(const Rect& bounds, std::size_t count, double x, double y);
+[[nodiscard]] bool                       shouldSuppressCollapsedGroupMember(std::uintptr_t itemGroupId, std::uintptr_t windowGroupId,
+                                                                          std::uintptr_t boundWindowId, std::uintptr_t windowId);
+[[nodiscard]] Rect                       floatingSegmentBarRect(const Rect& preview, std::size_t count, double height = 24.0,
+                                                              double gap = 7.0, double minSegmentWidth = 56.0,
+                                                              double maxSegmentWidth = 128.0, double horizontalInset = 8.0);
 [[nodiscard]] std::vector<Rect>           stackedGroupPreviewRects(const std::vector<Rect>& sourceRects, std::size_t frontIndex, double pointerX,
                                                                    double pointerY, double grabRatioX, double grabRatioY, double scale,
                                                                    double layerOffset = 10.0, double maxSpread = 48.0);

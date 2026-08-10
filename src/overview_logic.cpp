@@ -387,6 +387,32 @@ std::optional<std::size_t> hitTestEqualSegments(const Rect& bounds, std::size_t 
     return std::min(count - 1, static_cast<std::size_t>(std::floor((x - bounds.x) / segmentWidth)));
 }
 
+bool shouldSuppressCollapsedGroupMember(std::uintptr_t itemGroupId, std::uintptr_t windowGroupId, std::uintptr_t boundWindowId, std::uintptr_t windowId) {
+    return itemGroupId != 0 && windowGroupId == itemGroupId && boundWindowId != 0 && windowId != 0 && windowId != boundWindowId;
+}
+
+Rect floatingSegmentBarRect(const Rect& preview, std::size_t count, double height, double gap, double minSegmentWidth,
+                            double maxSegmentWidth, double horizontalInset) {
+    if (count < 2 || preview.width <= 0.0 || preview.height <= 0.0)
+        return {};
+
+    height = std::max(1.0, height);
+    gap = std::max(0.0, gap);
+    horizontalInset = std::max(0.0, horizontalInset);
+    minSegmentWidth = std::max(1.0, minSegmentWidth);
+    maxSegmentWidth = std::max(minSegmentWidth, maxSegmentWidth);
+
+    const double availableWidth = std::max(1.0, preview.width - horizontalInset * 2.0);
+    const double preferredWidth = std::clamp(availableWidth / static_cast<double>(count), minSegmentWidth, maxSegmentWidth) * static_cast<double>(count);
+    const double width = std::min(availableWidth, preferredWidth);
+    return {
+        preview.centerX() - width * 0.5,
+        preview.y - gap - height,
+        width,
+        height,
+    };
+}
+
 std::vector<Rect> stackedGroupPreviewRects(const std::vector<Rect>& sourceRects, std::size_t frontIndex, double pointerX, double pointerY,
                                            double grabRatioX, double grabRatioY, double scale, double layerOffset, double maxSpread) {
     std::vector<Rect> result(sourceRects.size());
