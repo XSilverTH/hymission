@@ -3959,6 +3959,22 @@ void OverviewController::rendererDrawElementHook(void* rendererThisptr, WP<IPass
     if (shouldSuppressHyprbarsPassElement(element.get()))
         return;
 
+    auto* renderData = surfaceRenderDataMutable(element.get());
+    auto  monitor = renderData ? renderData->pMonitor.lock() : PHLMONITOR{};
+    if (!rawWindowRenderActive() && renderData && renderData->pWindow && monitor && isVisible() && ownsMonitor(monitor) &&
+        shouldApplyOverviewTransform(renderData->pWindow) && previewMonitorForWindow(renderData->pWindow) == monitor) {
+        const float savedAlpha = renderData->alpha;
+        const float savedFadeAlpha = renderData->fadeAlpha;
+        renderData->alpha = managedPreviewAlphaFor(renderData->pWindow, savedAlpha);
+        if (!isWindowFadingOut(renderData->pWindow))
+            renderData->fadeAlpha = 1.0F;
+
+        m_rendererDrawElementOriginal(rendererThisptr, element, damage);
+        renderData->alpha = savedAlpha;
+        renderData->fadeAlpha = savedFadeAlpha;
+        return;
+    }
+
     m_rendererDrawElementOriginal(rendererThisptr, element, damage);
 }
 
