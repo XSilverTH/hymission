@@ -2847,6 +2847,7 @@ void OverviewController::renderStage(eRenderStage stage) {
         updateGroupDragSettlement();
         updateOverviewWorkspaceTransition();
         updateAnimation();
+        latchDraggedPreviewRenderFrame();
         flushQueuedSelectionRetargetDuringOverview();
         flushQueuedRealFocusDuringOverview();
         renderBackdrop();
@@ -8049,7 +8050,7 @@ std::optional<OverviewController::WindowTransform> OverviewController::windowTra
         current = managed->targetGlobal;
     } else {
         current = workspaceTransitionRectForWindow(window).value_or(currentPreviewRect(*managed));
-        if (const auto draggedPreview = draggedPreviewRectFor(window); draggedPreview)
+        if (const auto draggedPreview = draggedPreviewRenderRectFor(window); draggedPreview)
             current = *draggedPreview;
         else if (m_dropAnimation && m_dropAnimation->returning && m_dropAnimation->window == window) {
             const double raw = dropAnimationProgress();
@@ -8813,6 +8814,27 @@ std::optional<Rect> OverviewController::draggedPreviewRectFor(const PHLWINDOW& w
     const Rect following = makeRect(pointer.x - offsetX, pointer.y - offsetY, sourcePreview.width * scale, sourcePreview.height * scale);
 
     return following;
+}
+
+void OverviewController::latchDraggedPreviewRenderFrame() {
+    m_draggedWindowRenderFrameWindow.reset();
+    m_draggedWindowRenderFrameRect.reset();
+    if (!m_draggedWindowIndex || *m_draggedWindowIndex >= m_state.windows.size())
+        return;
+
+    const auto window = m_state.windows[*m_draggedWindowIndex].window;
+    if (!window || (m_groupDragSession && m_groupDragSession->group))
+        return;
+
+    m_draggedWindowRenderFrameWindow = window;
+    m_draggedWindowRenderFrameRect = draggedPreviewRectFor(window);
+}
+
+std::optional<Rect> OverviewController::draggedPreviewRenderRectFor(const PHLWINDOW& window) const {
+    if (window && m_draggedWindowRenderFrameWindow == window && m_draggedWindowRenderFrameRect)
+        return m_draggedWindowRenderFrameRect;
+
+    return draggedPreviewRectFor(window);
 }
 
 double OverviewController::draggedPreviewTargetScaleForHover() const {
@@ -11944,6 +11966,8 @@ void OverviewController::clearStripWindowDragState() {
     m_dragDimStart = {};
     m_pressedWindowPointer = {};
     m_draggedWindowPointerOffset = {};
+    m_draggedWindowRenderFrameWindow.reset();
+    m_draggedWindowRenderFrameRect.reset();
     m_draggedWindowScaleFrom = 1.0;
     m_draggedWindowTargetScale = DRAG_PREVIEW_SCALE;
     m_draggedWindowStart = {};
@@ -12386,7 +12410,7 @@ void OverviewController::renderDraggedWindowPreview() const {
         window = dragged.window;
         monitor = dragged.targetMonitor;
         texture = m_draggedWindowTexture;
-        preview = draggedPreviewRectFor(window).value_or(Rect{});
+        preview = draggedPreviewRenderRectFor(window).value_or(Rect{});
         decorationScale = draggedPreviewScale();
     } else if (m_dropAnimation && m_dropAnimation->window && m_dropAnimation->monitor && m_dropAnimation->texture) {
         window = m_dropAnimation->window;
@@ -12479,7 +12503,7 @@ void OverviewController::refreshDraggedWindowCompositeTexture() {
         !sourceFramebuffer->isAllocated())
         return;
 
-    const Rect preview = draggedPreviewRectFor(dragged.window).value_or(Rect{});
+    const Rect preview = draggedPreviewRenderRectFor(dragged.window).value_or(Rect{});
     const Rect sourceRect = rectToMonitorRenderLocal(preview, renderMonitor);
     if (sourceRect.width <= 1.0 || sourceRect.height <= 1.0)
         return;

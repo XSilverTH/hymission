@@ -701,6 +701,8 @@ class OverviewController {
     [[nodiscard]] PHLWORKSPACE               thumbnailWorkspaceAtPoint(double x, double y) const;
     [[nodiscard]] std::optional<DragPreviewTarget> draggedPreviewTargetFor(const PHLWINDOW& window) const;
     [[nodiscard]] std::optional<Rect>              draggedPreviewRectFor(const PHLWINDOW& window) const;
+    void                                             latchDraggedPreviewRenderFrame();
+    [[nodiscard]] std::optional<Rect>              draggedPreviewRenderRectFor(const PHLWINDOW& window) const;
     [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> hitTestCollapsedGroupLabel(double x, double y) const;
     [[nodiscard]] Rect collapsedGroupLabelBarRect(const ManagedWindow& managed) const;
     bool switchCollapsedGroupMember(std::size_t windowIndex, std::size_t memberIndex, const char* source);
@@ -989,6 +991,8 @@ class OverviewController {
     mutable std::optional<SpatialPickCache> m_spatialPickCache;
     Vector2D                  m_pressedWindowPointer;
     Vector2D                  m_draggedWindowPointerOffset;
+    PHLWINDOW                 m_draggedWindowRenderFrameWindow;
+    std::optional<Rect>       m_draggedWindowRenderFrameRect;
     double                    m_draggedWindowScaleFrom = 1.0;
     double                    m_draggedWindowTargetScale = 0.65;
     std::chrono::steady_clock::time_point m_draggedWindowStart = {};
