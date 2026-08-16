@@ -996,7 +996,7 @@ class OverviewController {
     double                    m_draggedWindowScaleFrom = 1.0;
     double                    m_draggedWindowTargetScale = 0.65;
     std::chrono::steady_clock::time_point m_draggedWindowStart = {};
-    std::chrono::steady_clock::time_point m_lastCollapsedGroupScroll = {};
+    std::chrono::steady_clock::time_point m_lastOverviewScroll = {};
     Vector2D                  m_hoverSelectionAnchorPointer;
     bool                      m_hoverSelectionAnchorValid = false;
     std::chrono::steady_clock::time_point m_hoverSelectionRetargetBlockedUntil = {};

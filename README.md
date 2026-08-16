@@ -448,6 +448,12 @@ overview-to-overview transition path.
 | `expand_selected_window` | bool | `0` | Deprecated compatibility key. It is accepted to avoid a config error but ignored, and an on-screen migration notice asks the user to switch to `selected_expand_scale` / `hover_expand_scale`. |
 | `show_focus_indicator` | bool | `0` | Render selected and hovered preview focus chrome. |
 
+While overview is visible, vertical mouse-wheel input cycles the selected
+window in overview order: scrolling down selects the next window and scrolling
+up selects the previous one, wrapping at either end. In collapsed grouped-window
+mode, scrolling over a grouped preview continues to cycle that group's members
+instead.
+
 #### Toggle switch behavior
 
 | Option | Type | Default | Description |

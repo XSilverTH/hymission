@@ -3275,31 +3275,35 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
 }
 
 bool OverviewController::handleMouseAxis(const IPointer::SAxisEvent& event) {
-    if (!shouldHandleInput() || !collapsedGroupScrollEnabled() || event.axis != WL_POINTER_AXIS_VERTICAL_SCROLL || m_draggedWindowIndex)
+    if (!shouldHandleInput() || event.axis != WL_POINTER_AXIS_VERTICAL_SCROLL || m_draggedWindowIndex)
         return false;
 
     const auto now = std::chrono::steady_clock::now();
-    if (m_lastCollapsedGroupScroll != std::chrono::steady_clock::time_point{} && now - m_lastCollapsedGroupScroll < std::chrono::milliseconds(90))
+    if (m_lastOverviewScroll != std::chrono::steady_clock::time_point{} && now - m_lastOverviewScroll < std::chrono::milliseconds(90))
         return true;
-
-    const Vector2D pointer = g_pInputManager->getMouseCoordsInternal();
-    const auto index = hitTestTarget(pointer.x, pointer.y);
-    if (!index || *index >= m_state.windows.size())
-        return false;
-
-    const auto& managed = m_state.windows[*index];
-    if (!managed.collapsedGroup || !managed.group || managed.group->size() < 2)
-        return false;
 
     const double delta = event.deltaDiscrete != 0 ? static_cast<double>(event.deltaDiscrete) : event.delta;
     if (std::abs(delta) < 0.001)
         return true;
 
-    const std::size_t count = managed.group->size();
-    const std::size_t current = std::min(managed.group->getCurrentIdx(), count - 1);
-    const auto next = chooseCyclicIndex(count, current, delta > 0.0 ? 1 : -1);
-    if (next && switchCollapsedGroupMember(*index, *next, "mouse-group-scroll"))
-        m_lastCollapsedGroupScroll = now;
+    if (collapsedGroupScrollEnabled()) {
+        const Vector2D pointer = g_pInputManager->getMouseCoordsInternal();
+        const auto index = hitTestTarget(pointer.x, pointer.y);
+        if (index && *index < m_state.windows.size()) {
+            const auto& managed = m_state.windows[*index];
+            if (managed.collapsedGroup && managed.group && managed.group->size() >= 2) {
+                const std::size_t count = managed.group->size();
+                const std::size_t current = std::min(managed.group->getCurrentIdx(), count - 1);
+                const auto next = chooseCyclicIndex(count, current, delta > 0.0 ? 1 : -1);
+                if (next && switchCollapsedGroupMember(*index, *next, "mouse-group-scroll"))
+                    m_lastOverviewScroll = now;
+                return true;
+            }
+        }
+    }
+
+    if (moveSelectionCircular(delta > 0.0 ? 1 : -1, "mouse-wheel-selection"))
+        m_lastOverviewScroll = now;
     return true;
 }
 
