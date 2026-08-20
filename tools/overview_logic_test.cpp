@@ -138,6 +138,27 @@ int main() {
     ok &= expect(parsePickLabelsMode("SPATIAL") == PickLabelsMode::Spatial, "spatial pick-label mode should be case-insensitive");
     ok &= expect(parsePickLabelsMode("unknown") == PickLabelsMode::Sequential, "unknown pick-label modes should preserve sequential behavior");
     ok &= expect(parseGroupedWindowsPolicy("expanded") == GroupedWindowsPolicy::Expanded, "expanded grouped-window policy should parse");
+
+    const auto composedQuery = normalizedSearchText("ÉDITEUR");
+    ok &= expect(windowMatchesSearch("e\xCC\x81" "diteur de texte", "org.example.Editor", composedQuery),
+                 "search should normalize canonically equivalent Unicode and case-fold it");
+    ok &= expect(windowMatchesSearch("Terminal", "org.gnome.Console", normalizedSearchText("CONSOLE")),
+                 "search should match window class case-insensitively");
+    ok &= expect(windowMatchesSearch("Terminal", "org.gnome.Console", {}), "an empty search should match every window");
+    ok &= expect(!windowMatchesSearch("Terminal", "org.gnome.Console", normalizedSearchText("browser")),
+                 "an unrelated query should produce no match");
+
+    constexpr uint32_t SHIFT = 1U << 0;
+    constexpr uint32_t CAPS = 1U << 1;
+    constexpr uint32_t CTRL = 1U << 2;
+    constexpr uint32_t ALT = 1U << 3;
+    constexpr uint32_t SUPER = 1U << 6;
+    constexpr uint32_t COMMAND_MODIFIERS = CTRL | ALT | SUPER;
+    ok &= expect(overviewTextInputAllowed(0, COMMAND_MODIFIERS), "plain keys should be eligible for label/search input");
+    ok &= expect(overviewTextInputAllowed(SHIFT | CAPS, COMMAND_MODIFIERS), "Shift and Caps Lock should remain valid text modifiers");
+    ok &= expect(!overviewTextInputAllowed(CTRL, COMMAND_MODIFIERS), "Ctrl shortcuts must pass through overview label handling");
+    ok &= expect(!overviewTextInputAllowed(ALT, COMMAND_MODIFIERS), "Alt shortcuts must pass through overview label handling");
+    ok &= expect(!overviewTextInputAllowed(SUPER, COMMAND_MODIFIERS), "Super shortcuts must pass through overview label handling");
     ok &= expect(parseGroupedWindowsPolicy(" COLLAPSED ") == GroupedWindowsPolicy::Collapsed, "collapsed grouped-window policy should trim and ignore case");
     ok &= expect(parseGroupedWindowsPolicy("invalid") == GroupedWindowsPolicy::Expanded, "invalid grouped-window policy should fall back to expanded");
     {

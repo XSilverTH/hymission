@@ -33,12 +33,21 @@ src = [
   'src/overview_controller.cpp',
 ]
 
+glib_dep = dependency('glib-2.0')
+
 shared_module(meson.project_name(), src,
   dependencies: [
     dependency('hyprland'),
     dependency('lua'),
+    glib_dep,
   ],
   install: true,
+)
+
+executable('hymission-search-input', 'src/search_input.cpp',
+  dependencies: [dependency('gtk4'), dependency('gtk4-layer-shell-0')],
+  install: true,
+  install_dir: get_option('libexecdir'),
 )
 
 executable('hymission-layout-demo',
@@ -58,6 +67,7 @@ test('hymission-mission-layout-test', mission_layout_test)
 overview_logic_test = executable('hymission-overview-logic-test',
   ['tools/overview_logic_test.cpp', 'src/overview_logic.cpp'],
   include_directories: include_directories('src'),
+  dependencies: [dependency('hyprland'), glib_dep],
   install: false,
 )
 

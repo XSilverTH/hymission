@@ -65,6 +65,7 @@ Requirements:
 - `cmake`
 - `pkg-config`
 - a C++23-capable compiler
+- GLib 2, GTK 4, and gtk4-layer-shell (used by the bundled Wayland IME search helper)
 
 `nlohmann/json` is bundled as a single header under `src/vendor/` (v3.12.0),
 so no system package is required. Do not re-add `find_package(nlohmann_json)`.
@@ -98,6 +99,7 @@ hyprctl plugin list
 Build outputs:
 
 - Plugin: `build-cmake/libhymission.so`
+- Search input helper: `build-cmake/hymission-search-input`
 - Layout demo: `build-cmake/hymission-layout-demo`
 - Layout test: `build-cmake/hymission-mission-layout-test`
 - Logic test: `build-cmake/hymission-overview-logic-test`
@@ -527,6 +529,17 @@ workspace thumbnail. Group order, membership, and lock state are preserved.
 
 - In `sequential` mode, past the 9th window a letter key (`A`-`Z`) arms a ~1.5s prefix waiting for its digit (e.g. `A` then `2` picks `A2`); any other key cancels the prefix without losing its own normal effect (e.g. `Esc` still closes overview).
 - In `spatial` mode, key positions and activation use physical ANSI alphanumeric and punctuation keycodes (`` ` 1-0 - = Q-P [ ] \\ A-L ; ' Z-M , . / ``), while badge text follows the active keyboard's current XKB layout automatically (using its unshifted level, so Shift/Caps Lock do not change the badge). A shared primary waits up to ~1.5s for the same key (center) or an adjacent key in the labelled direction; equivalent adjacent keys in that direction are also accepted.
+- Label input only consumes plain keys (Shift and Caps Lock are allowed). Ctrl, Alt, and Super combinations are left to Hyprland, so global shortcuts remain available while overview is open.
+
+### Window search
+
+Search filters the current overview scope by Unicode-normalized, case-insensitive window title or class and relayouts matching previews as the query changes.
+
+- With `pick_labels_enabled = 0`, the search helper is focused transparently when overview opens. Typing a character or starting an IME preedit reveals the top-centered search bar without losing the first key.
+- With `pick_labels_enabled = 1`, press `/` to enter search. This takes priority over the spatial `/` label. Labels and label-prefix state are disabled for the remainder of that overview search session.
+- An empty query restores all scoped windows while keeping search active. A query with no matches keeps overview open and displays `0 results`.
+- Arrow keys navigate matching previews, `Return` activates the selection, and `Escape` exits overview. While an IME preedit is active, candidate navigation, confirmation, and cancellation are handled by the IME first.
+- The helper is installed with Hymission and communicates only through an inherited Unix socketpair; it does not expose a filesystem or network socket.
 
 ### Window decorations and controls
 

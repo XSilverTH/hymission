@@ -5,8 +5,13 @@
 #include <cmath>
 #include <cctype>
 #include <expected>
+#include <dlfcn.h>
+#include <fcntl.h>
 #include <fstream>
+#include <filesystem>
 #include <limits>
+#include <spawn.h>
+#include <signal.h>
 #include <linux/input-event-codes.h>
 #include <numeric>
 #include <optional>
@@ -18,6 +23,9 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 #include "vendor/nlohmann/json.hpp"
@@ -71,7 +79,27 @@
 
 #include "overview_logic.hpp"
 
+extern char** environ;
+
 namespace hymission {
+
+namespace {
+void searchHelperAnchor() {}
+
+std::string searchHelperPath() {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&searchHelperAnchor), &info) && info.dli_fname) {
+        std::filesystem::path sibling = std::filesystem::path(info.dli_fname).parent_path() / "hymission-search-input";
+        if (access(sibling.c_str(), X_OK) == 0)
+            return sibling.string();
+    }
+    for (const char* path : {"/usr/lib/hymission-search-input", "/usr/libexec/hymission-search-input", "/usr/local/libexec/hymission-search-input"}) {
+        if (access(path, X_OK) == 0)
+            return path;
+    }
+    return {};
+}
+} // namespace
 
 using Render::GL::g_pHyprOpenGL;
 class OverviewOverlayPassElement final : public IPassElement {
@@ -2240,6 +2268,7 @@ OverviewController::OverviewController(HANDLE handle) : m_handle(handle) {
 }
 
 OverviewController::~OverviewController() {
+    stopSearchInput();
     setDamageTrackingOverride(false);
     destroyGaussianBlurPipeline();
     clearToggleSwitchReleasePollTimer();
@@ -3337,10 +3366,24 @@ void OverviewController::handleKeyboard(const IKeyboard::SKeyEvent& event, Event
         return;
     }
 
+    if (m_searchActive && m_searchInputFd >= 0)
+        return;
+
     if (event.state != WL_KEYBOARD_KEY_STATE_PRESSED)
         return;
 
     const xkb_keysym_t keysym = xkb_state_key_get_one_sym(keyboard->m_xkbState, event.keycode + 8);
+
+    if (!overviewTextInputAllowed(keyboard->getModifiers(), HL_MODIFIER_CTRL | HL_MODIFIER_ALT | HL_MODIFIER_META)) {
+        clearPickLabelPrefixState();
+        return;
+    }
+
+    if (pickLabelsEnabled() && (keysym == XKB_KEY_slash || keysym == XKB_KEY_KP_Divide)) {
+        if (startSearchInput())
+            info.cancelled = true;
+        return;
+    }
 
     if (handlePickLabelKey(keysym, event.keycode)) {
         info.cancelled = true;
@@ -3375,6 +3418,168 @@ void OverviewController::handleKeyboard(const IKeyboard::SKeyEvent& event, Event
 
     if (handled)
         info.cancelled = true;
+}
+
+bool OverviewController::startSearchInput() {
+    if (m_searchActive)
+        return true;
+
+    const std::string helper = searchHelperPath();
+    if (helper.empty()) {
+        notifySearchFailureOnce("[hymission] search input helper not found");
+        return false;
+    }
+
+    int sockets[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sockets) != 0) {
+        notifySearchFailureOnce("[hymission] failed to create search input channel");
+        return false;
+    }
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, sockets[1], 3);
+    if (sockets[0] != 3)
+        posix_spawn_file_actions_addclose(&actions, sockets[0]);
+    if (sockets[1] != 3)
+        posix_spawn_file_actions_addclose(&actions, sockets[1]);
+    char* argv[] = {const_cast<char*>(helper.c_str()), nullptr};
+    pid_t pid = -1;
+    const int spawnError = posix_spawn(&pid, helper.c_str(), &actions, nullptr, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    ::close(sockets[1]);
+    if (spawnError != 0) {
+        ::close(sockets[0]);
+        notifySearchFailureOnce("[hymission] failed to start search input helper");
+        return false;
+    }
+
+    m_searchInputFd = sockets[0];
+    m_searchInputPid = pid;
+    m_searchActive = true;
+    m_searchPreeditActive = false;
+    m_searchQuery.clear();
+    m_searchNormalizedQuery.clear();
+    clearPickLabelPrefixState();
+
+    auto* loop = g_pCompositor && g_pCompositor->m_wlDisplay ? wl_display_get_event_loop(g_pCompositor->m_wlDisplay) : nullptr;
+    if (!loop) {
+        stopSearchInput();
+        return false;
+    }
+    m_searchInputSource = wl_event_loop_add_fd(loop, m_searchInputFd, WL_EVENT_READABLE | WL_EVENT_HANGUP | WL_EVENT_ERROR,
+        [](int, uint32_t mask, void* data) { return static_cast<OverviewController*>(data)->handleSearchInputFd(mask); }, this);
+    if (!m_searchInputSource) {
+        stopSearchInput();
+        return false;
+    }
+    return true;
+}
+
+void OverviewController::stopSearchInput(bool clearSearchState) {
+    m_searchPreeditActive = false;
+    if (clearSearchState) {
+        m_searchActive = false;
+        m_searchQuery.clear();
+        m_searchNormalizedQuery.clear();
+    }
+    if (m_searchInputSource) {
+        wl_event_source_remove(m_searchInputSource);
+        m_searchInputSource = nullptr;
+    }
+    if (m_searchInputFd >= 0) {
+        ::close(m_searchInputFd);
+        m_searchInputFd = -1;
+    }
+    if (m_searchInputPid > 0) {
+        if (waitpid(m_searchInputPid, nullptr, WNOHANG) == 0) {
+            kill(m_searchInputPid, SIGTERM);
+            (void)waitpid(m_searchInputPid, nullptr, 0);
+        }
+        m_searchInputPid = -1;
+    }
+}
+
+int OverviewController::handleSearchInputFd(uint32_t mask) {
+    if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
+        stopSearchInput();
+        if (isVisible() && m_state.phase != Phase::Closing && m_state.phase != Phase::ClosingSettle)
+            rebuildVisibleState({}, true);
+        return 0;
+    }
+
+    std::array<char, 65536> packet{};
+    const ssize_t size = recv(m_searchInputFd, packet.data(), packet.size(), MSG_DONTWAIT);
+    if (size <= 0)
+        return 0;
+
+    const std::string_view payload(packet.data() + 1, static_cast<std::size_t>(size - 1));
+    switch (packet[0]) {
+        case 'R':
+            sendSearchResultCount();
+            break;
+        case 'Q':
+            applySearchQuery(std::string(payload));
+            break;
+        case 'P':
+            m_searchPreeditActive = payload == "1";
+            break;
+        case 'N':
+            (void)moveSelectionCircular(payload == "-1" ? -1 : 1, "search-input");
+            break;
+        case 'A':
+            activateSelection();
+            break;
+        case 'E':
+            beginClose();
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
+void OverviewController::applySearchQuery(std::string query) {
+    if (!m_searchActive || query == m_searchQuery)
+        return;
+    const auto preferred = selectedWindow();
+    m_searchQuery = std::move(query);
+    m_searchNormalizedQuery = normalizedSearchText(m_searchQuery);
+    if (!m_searchNormalizedQuery.empty()) {
+        for (std::size_t windowIndex = 0; windowIndex < m_state.windows.size(); ++windowIndex) {
+            const auto& managed = m_state.windows[windowIndex];
+            if (!managed.collapsedGroup || !managed.group)
+                continue;
+            for (std::size_t memberIndex = 0; memberIndex < managed.groupMembers.size(); ++memberIndex) {
+                if (windowMatchesActiveSearch(managed.groupMembers[memberIndex].lock())) {
+                    switchCollapsedGroupMember(windowIndex, memberIndex, "search-match");
+                    break;
+                }
+            }
+        }
+    }
+    clearSpatialPickCache();
+    rebuildVisibleState(preferred, false);
+    sendSearchResultCount();
+}
+
+void OverviewController::sendSearchResultCount() const {
+    if (!m_searchActive || m_searchInputFd < 0)
+        return;
+    const std::string packet = "C" + std::to_string(m_state.windows.size());
+    send(m_searchInputFd, packet.data(), packet.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
+}
+
+bool OverviewController::windowMatchesActiveSearch(const PHLWINDOW& window) const {
+    return !m_searchActive || m_searchNormalizedQuery.empty() ||
+        (window && windowMatchesSearch(window->m_title, window->m_class, m_searchNormalizedQuery));
+}
+
+void OverviewController::notifySearchFailureOnce(const std::string& message) {
+    if (m_searchFailureNotified)
+        return;
+    m_searchFailureNotified = true;
+    notify(message, CHyprColor(1.0, 0.2, 0.2, 1.0), 4000);
 }
 
 void OverviewController::handleWindowSetChange(PHLWINDOW window, WindowSetChangeKind kind, bool preferDeferredRebuild) {
@@ -3614,6 +3819,12 @@ bool OverviewController::shouldRenderWindowHook(const PHLWINDOW& window, const P
                                                 reinterpret_cast<std::uintptr_t>(window.get())))
             return false;
     }
+
+    // Filtered windows are no longer managed overview items, so without this
+    // guard Hyprland's normal pass would draw them at desktop geometry.
+    if (isVisible() && m_searchActive && !m_searchNormalizedQuery.empty() && window && monitor && ownsMonitor(monitor) &&
+        !windowMatchesActiveSearch(window))
+        return false;
 
     // Single-surface windows use an independent texture and must be omitted
     // from the regular pass. Multi-surface windows stay visible long enough to
@@ -10582,6 +10793,8 @@ void OverviewController::beginOpen(const PHLMONITOR& monitor, ScopeOverride requ
     m_deactivatePending = false;
     carryOverWorkspaceStripSnapshots(next, m_state);
     m_state = std::move(next);
+    if (!pickLabelsEnabled())
+        (void)startSearchInput();
     armOverviewRenderState(m_state);
     m_hoverSelectionAnchorValid = false;
     m_hoverSelectionRetargetBlockedUntil = {};
@@ -10691,6 +10904,7 @@ void OverviewController::beginClose(CloseMode mode, std::optional<double> fromVi
         return;
 
     const ScopedFlag beginCloseGuard(m_beginCloseInProgress);
+    stopSearchInput(false);
     clearToggleSwitchSession();
 
     clearPendingWindowGeometryRetry();
@@ -10886,6 +11100,7 @@ void OverviewController::beginClose(CloseMode mode, std::optional<double> fromVi
 }
 
 void OverviewController::deactivate() {
+    stopSearchInput();
     setDamageTrackingOverride(false);
     if (m_closeCursorOverride) {
         if (Pointer::Cursor::mgr())
@@ -11587,8 +11802,8 @@ void OverviewController::rebuildVisibleState(PHLWINDOW preferredSelectedWindow, 
             out << " active=<null>";
         debugLog(out.str());
     }
-    State next = buildState(monitor, requestedScope, {}, false, false, layoutSelectedWindow);
-    if (next.windows.empty() && next.stripEntries.empty()) {
+    State next = buildState(monitor, requestedScope, {}, m_searchActive, false, layoutSelectedWindow);
+    if (!m_searchActive && next.windows.empty() && next.stripEntries.empty()) {
         beginClose(CloseMode::Abort);
         return;
     }
@@ -12662,7 +12877,7 @@ void OverviewController::renderCollapsedGroupLabels() const {
 }
 
 void OverviewController::renderPickLabels() const {
-    if (!pickLabelsShown() || !pickLabelsInteractionAllowed())
+    if (m_searchActive || !pickLabelsShown() || !pickLabelsInteractionAllowed())
         return;
 
     const double progress = visualProgress();
@@ -14006,6 +14221,17 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
         if (!shouldManageWindow(window, state))
             continue;
 
+        if (m_searchActive && !m_searchNormalizedQuery.empty()) {
+            bool matches = windowMatchesActiveSearch(window);
+            if (!matches && groupPolicy == GroupedWindowsPolicy::Collapsed && window && window->m_group) {
+                matches = std::ranges::any_of(window->m_group->windows(), [&](const PHLWINDOWREF& memberRef) {
+                    return windowMatchesActiveSearch(memberRef.lock());
+                });
+            }
+            if (!matches)
+                continue;
+        }
+
         const auto targetMonitor = preferredMonitorForWindow(window, state);
         if (!targetMonitor)
             continue;
@@ -14096,7 +14322,7 @@ OverviewController::State OverviewController::buildState(const PHLMONITOR& monit
         const auto directIt = directNiriOverviewWindowsByMonitor.find(candidateMonitor->m_id);
         const bool hasDirectNiriOverviewWindows = directIt != directNiriOverviewWindowsByMonitor.end() && directIt->second > 0;
         const bool hasStripWorkspace = workspaceStripEnabled(state) && static_cast<bool>(candidateMonitor->m_activeWorkspace);
-        const bool keepMonitor = keepEmptyParticipatingMonitors && overrideForMonitor(candidateMonitor);
+        const bool keepMonitor = keepEmptyParticipatingMonitors && (overrideForMonitor(candidateMonitor) || m_searchActive);
         if ((inputsIt == inputsByMonitor.end() || inputsIt->second.empty()) && !hasDirectNiriOverviewWindows && !keepMonitor && !hasStripWorkspace)
             continue;
 

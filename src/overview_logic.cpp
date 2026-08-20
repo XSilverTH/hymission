@@ -8,6 +8,8 @@
 #include <string_view>
 #include <unordered_set>
 
+#include <glib.h>
+
 namespace hymission {
 
 namespace {
@@ -1064,6 +1066,32 @@ std::vector<Rect> layoutNiriWorkspaceStripSlots(const Rect& stripBand, Workspace
 
 std::optional<std::size_t> hitTestWorkspaceStrip(const std::vector<Rect>& rects, double x, double y) {
     return hitTest(rects, x, y);
+}
+
+std::string normalizedSearchText(std::string_view value) {
+    if (value.empty())
+        return {};
+
+    gchar* normalized = g_utf8_normalize(value.data(), static_cast<gssize>(value.size()), G_NORMALIZE_ALL_COMPOSE);
+    if (!normalized)
+        return {};
+    gchar* folded = g_utf8_casefold(normalized, -1);
+    g_free(normalized);
+    if (!folded)
+        return {};
+    std::string result = folded;
+    g_free(folded);
+    return result;
+}
+
+bool windowMatchesSearch(std::string_view title, std::string_view windowClass, std::string_view normalizedQuery) {
+    if (normalizedQuery.empty())
+        return true;
+    return normalizedSearchText(title).contains(normalizedQuery) || normalizedSearchText(windowClass).contains(normalizedQuery);
+}
+
+bool overviewTextInputAllowed(uint32_t modifiers, uint32_t commandModifierMask) {
+    return (modifiers & commandModifierMask) == 0;
 }
 
 } // namespace hymission

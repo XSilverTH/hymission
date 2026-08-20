@@ -35,7 +35,6 @@ v1 不做：
 
 - 跨 workspace 拖拽窗口
 - 完整 surface 级别的 workspace 缩略图
-- 搜索过滤
 - group / stack 展开
 - popup 的完整 preview 语义
 - 修改客户端渲染分辨率
@@ -249,6 +248,7 @@ gesture-only 参数：
 - 当 `overview_focus_follows_mouse = 1` 且 overview 打开前 `input:follow_mouse != 0` 时，方向键改变选中项也必须实时同步真实活动窗口
 - 方向选择规则：按 preview box 几何关系选择对应方向的最近邻
 - `Return`：激活当前选中窗口并退出 overview
+- label 与搜索只可消费不含 `Ctrl` / `Alt` / `Super` 的按键；`Shift` 与 Caps Lock 可参与字符输入。带命令修饰键的输入必须交还 Hyprland 全局快捷键处理
 
 `hjkl` 是否支持不作为 v1 强制项；若实现，应与方向键语义一致。
 
@@ -273,11 +273,23 @@ gesture-only 参数：
 - 共享路径标签显示规范两键序列（如 `FF`、`FR`）；同方向上的其他有效相邻键也可完成选择
 - 无效的第二个字母数字键会作为新的起始键重新处理；`Esc`、方向键和 `Return` 取消待定路径后保留原语义；超出全部空间路径容量的窗口继续支持鼠标和方向键
 
+窗口搜索与 label 互斥：
+
+- `pick_labels_enabled = 0` 时，overview 打开即透明启动并聚焦搜索输入 helper；首个直接字符或 IME preedit 出现时显示顶部居中的搜索条，首键不得丢失
+- `pick_labels_enabled = 1` 时保持 label 模式，按 `/` 切换到搜索；`/` 的搜索入口优先于 spatial label 路径
+- 搜索按当前 overview scope 重新收集窗口，对标题和 class 执行 Unicode normalization 与 casefold 后的包含匹配
+- expanded group 逐成员过滤；collapsed group 任一成员命中即保留该组，并展示首个命中成员
+- 过滤后按既有 layout 重排；仍匹配的当前选择优先保留，否则选择视觉顺序第一项
+- 查询清空时恢复全部 scope 内窗口但保持搜索模式；零结果时 overview 与搜索条保持打开并显示 `0 results`
+- 搜索模式中不渲染或处理 label，也不保留 sequential/spatial 前缀状态；Backspace、Delete 与光标编辑由 helper 处理
+- `Esc` 退出 overview，`Return` 激活当前结果，方向键导航结果；IME preedit 活跃时这些候选操作先交给 IME，preedit 结束后恢复 overview 语义
+- helper 使用继承的 `AF_UNIX SOCK_SEQPACKET` socketpair 与插件通信，不开放外部 socket；helper 缺失、启动失败或异常退出时 overview 继续可用且不得吞字符或全局快捷键
+
 ### 6.4 overview 打开期间的集合变化
 
 - 如果 overview 打开期间有窗口关闭、打开、移动 workspace 或 monitor，且该变化会影响当前 scope，overview 应重建当前可见状态
 - 重建时应尽量保留仍然存在的窗口 preview 顺序与 monitor 归属，避免因瞬时 scrolling / focus 抖动把 preview 洗牌
-- 如果重建后 scope 内已经没有可参与窗口，overview 应自动退出
+- 如果非搜索状态重建后 scope 内已经没有可参与窗口，overview 应自动退出；搜索状态的零结果不得触发自动退出
 - 如果当前处于 overview-to-overview workspace 过渡中，窗口集变化应先取消这次过渡，再按最新窗口集重建
 
 ## 7. 多显示器与工作区语义

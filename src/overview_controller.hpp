@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <sys/types.h>
 
 #include <hyprland/src/SharedDefs.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
@@ -38,6 +39,7 @@
 #include "overview_logic.hpp"
 
 class CEventLoopTimer;
+struct wl_event_source;
 
 namespace hymission {
 
@@ -786,6 +788,13 @@ class OverviewController {
     void               armPickLabelPrefixTimeout();
     void               clearPickLabelPrefixState();
     void               clearSpatialPickCache();
+    [[nodiscard]] bool startSearchInput();
+    void               stopSearchInput(bool clearSearchState = true);
+    int                handleSearchInputFd(uint32_t mask);
+    void               applySearchQuery(std::string query);
+    void               sendSearchResultCount() const;
+    void               notifySearchFailureOnce(const std::string& message);
+    [[nodiscard]] bool windowMatchesActiveSearch(const PHLWINDOW& window) const;
     [[nodiscard]] const SpatialPickMap& spatialPickMapForCurrentState() const;
     void notify(const std::string& message, const CHyprColor& color, float durationMs) const;
     void warnAboutDeprecatedExpansionConfig();
@@ -1025,6 +1034,14 @@ class OverviewController {
     CHyprSignalListener       m_monitorRemovedListener;
     CHyprSignalListener       m_monitorFocusedListener;
     CHyprSignalListener       m_configReloadedListener;
+    int                       m_searchInputFd = -1;
+    pid_t                     m_searchInputPid = -1;
+    wl_event_source*          m_searchInputSource = nullptr;
+    std::string               m_searchQuery;
+    std::string               m_searchNormalizedQuery;
+    bool                      m_searchActive = false;
+    bool                      m_searchPreeditActive = false;
+    bool                      m_searchFailureNotified = false;
 };
 
 } // namespace hymission

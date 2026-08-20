@@ -200,5 +200,8 @@ struct WindowExpansionTarget {
                                                                   std::optional<std::size_t> activeIndex, double gap, double padding,
                                                                   double workspaceAspectRatio, double workspaceScale = 1.0);
 [[nodiscard]] std::optional<std::size_t> hitTestWorkspaceStrip(const std::vector<Rect>& rects, double x, double y);
+[[nodiscard]] std::string normalizedSearchText(std::string_view value);
+[[nodiscard]] bool        windowMatchesSearch(std::string_view title, std::string_view windowClass, std::string_view normalizedQuery);
+[[nodiscard]] bool        overviewTextInputAllowed(uint32_t modifiers, uint32_t commandModifierMask);
 
 } // namespace hymission
