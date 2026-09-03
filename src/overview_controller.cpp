@@ -1196,7 +1196,9 @@ bool blitFramebufferRegion(Render::IFramebuffer& sourceFramebuffer, Render::IFra
     return glGetError() == GL_NO_ERROR;
 }
 
-bool renderTextureIntoFramebuffer(const PHLMONITOR& monitor, const SP<Render::IFramebuffer>& targetFramebuffer, const SP<Render::ITexture>& texture, const CBox& destinationBox) {
+bool renderTextureIntoFramebuffer(const PHLMONITOR& monitor, const SP<Render::IFramebuffer>& targetFramebuffer, const SP<Render::ITexture>& texture,
+                                  const CBox& destinationBox, std::optional<eTransform> textureTransform = std::nullopt,
+                                  bool exportProjection = false) {
     if (!monitor || !g_pHyprRenderer || !g_pHyprOpenGL || !texture || !targetFramebuffer || !targetFramebuffer->isAllocated())
         return false;
 
@@ -1211,11 +1213,42 @@ bool renderTextureIntoFramebuffer(const PHLMONITOR& monitor, const SP<Render::IF
     }
 
     g_pHyprRenderer->m_renderData.blockScreenShader = true;
+    if (exportProjection)
+        g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
     g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.0, 0.0, 0.0, 0.0}}, fakeDamage);
+    const auto previousTextureTransform = texture->m_transform;
+    if (textureTransform)
+        texture->m_transform = *textureTransform;
     g_pHyprOpenGL->renderTexture(texture, destinationBox, {.a = 1.0F});
+    texture->m_transform = previousTextureTransform;
     g_pHyprRenderer->endRender();
     g_pHyprRenderer->m_renderData.blockScreenShader = previousBlockScreenShader;
     return true;
+}
+
+SP<Render::IFramebuffer> normalizeMonitorFramebuffer(const PHLMONITOR& monitor, const SP<Render::IFramebuffer>& sourceFramebuffer,
+                                                     const std::string& name) {
+    if (!monitor || !sourceFramebuffer || !sourceFramebuffer->isAllocated() || !sourceFramebuffer->getTexture())
+        return nullptr;
+
+    if (monitor->m_transform == WL_OUTPUT_TRANSFORM_NORMAL)
+        return sourceFramebuffer;
+
+    const int width = std::max(1, static_cast<int>(std::lround(monitor->m_transformedSize.x)));
+    const int height = std::max(1, static_cast<int>(std::lround(monitor->m_transformedSize.y)));
+    auto normalized = createFramebuffer(name);
+    if (!normalized || !normalized->alloc(width, height))
+        return nullptr;
+
+    normalized->setImageDescription(monitor->workBufferImageDescription());
+    setFramebufferLinearFiltering(*normalized);
+    // Hyprland snapshots use the output's physical buffer dimensions. Convert
+    // them back to transformed monitor space before logical crops or scaling.
+    const auto inverseTransform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
+    if (!renderTextureIntoFramebuffer(monitor, normalized, sourceFramebuffer->getTexture(), CBox(0, 0, width, height), inverseTransform, true))
+        return nullptr;
+
+    return normalized;
 }
 
 struct GaussianBlurPipeline {
@@ -3931,8 +3964,8 @@ double OverviewController::previewDecorationRoundingScale(const PHLMONITOR& moni
         return 1.0;
 
     const auto   fbSize = m_stripPreviewContext.framebufferSize;
-    const double monitorPixelWidth = std::max(1.0, static_cast<double>(monitor->m_size.x) * renderScaleForMonitor(monitor));
-    const double monitorPixelHeight = std::max(1.0, static_cast<double>(monitor->m_size.y) * renderScaleForMonitor(monitor));
+    const double monitorPixelWidth = std::max(1.0, static_cast<double>(monitor->m_pixelSize.x));
+    const double monitorPixelHeight = std::max(1.0, static_cast<double>(monitor->m_pixelSize.y));
     return std::clamp(std::min(fbSize.x / monitorPixelWidth, fbSize.y / monitorPixelHeight), 0.0, 1.0);
 }
 
@@ -8417,6 +8450,13 @@ bool OverviewController::captureHiddenStripLayerProxy(const PHLLS& layer, const 
             out << "[hymission] strip-bar capture missing source namespace=" << layer->m_namespace << " monitor=" << monitor->m_name;
             debugLog(out.str());
         }
+        return false;
+    }
+
+    sourceFramebuffer = normalizeMonitorFramebuffer(monitor, sourceFramebuffer, "hymission normalized hidden strip layer");
+    if (!sourceFramebuffer) {
+        if (debugLogsEnabled())
+            debugLog("[hymission] strip-bar capture failed to normalize rotated monitor framebuffer");
         return false;
     }
 
@@ -13357,7 +13397,7 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
             return false;
 
         const bool previousBlockScreenShaderLocal = g_pHyprRenderer->m_renderData.blockScreenShader;
-        CRegion     fakeDamage{0, 0, static_cast<int>(std::lround(targetFramebuffer->m_size.x)), static_cast<int>(std::lround(targetFramebuffer->m_size.y))};
+        CRegion     fakeDamage{0, 0, static_cast<int>(std::lround(monitor->m_transformedSize.x)), static_cast<int>(std::lround(monitor->m_transformedSize.y))};
         if (!g_pHyprRenderer->beginFullFakeRender(monitor, fakeDamage, targetFramebuffer)) {
             g_pHyprRenderer->m_renderData.blockScreenShader = previousBlockScreenShaderLocal;
             return false;
@@ -13398,16 +13438,17 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
     const auto renderNow = Time::steadyNow();
     bool       renderedScaledBackgroundOnly = false;
     if (!renderWorkspaceContents) {
-        const int backgroundFbWidth = std::max(1, static_cast<int>(std::ceil(static_cast<double>(monitor->m_size.x) * renderScaleForMonitor(monitor))));
-        const int backgroundFbHeight = std::max(1, static_cast<int>(std::ceil(static_cast<double>(monitor->m_size.y) * renderScaleForMonitor(monitor))));
+        const int backgroundFbWidth = std::max(1, static_cast<int>(std::lround(monitor->m_pixelSize.x)));
+        const int backgroundFbHeight = std::max(1, static_cast<int>(std::lround(monitor->m_pixelSize.y)));
         auto      backgroundFramebuffer = createFramebuffer("hymission workspace strip background");
         if (backgroundFramebuffer && backgroundFramebuffer->alloc(backgroundFbWidth, backgroundFbHeight)) {
             backgroundFramebuffer->setImageDescription(monitor->workBufferImageDescription());
             setFramebufferLinearFiltering(*backgroundFramebuffer);
-            renderedScaledBackgroundOnly =
-                renderBackgroundLayersIntoFramebuffer(backgroundFramebuffer, renderNow) &&
-                blitFramebufferRegion(*backgroundFramebuffer, *snapshot->framebuffer, makeRect(0.0, 0.0, backgroundFramebuffer->m_size.x, backgroundFramebuffer->m_size.y),
-                                     makeRect(0.0, 0.0, snapshot->framebuffer->m_size.x, snapshot->framebuffer->m_size.y));
+            const auto renderedBackground = renderBackgroundLayersIntoFramebuffer(backgroundFramebuffer, renderNow) ?
+                normalizeMonitorFramebuffer(monitor, backgroundFramebuffer, "hymission normalized workspace strip background") : nullptr;
+            renderedScaledBackgroundOnly = renderedBackground &&
+                blitFramebufferRegion(*renderedBackground, *snapshot->framebuffer, makeRect(0.0, 0.0, renderedBackground->m_size.x, renderedBackground->m_size.y),
+                                      makeRect(0.0, 0.0, snapshot->framebuffer->m_size.x, snapshot->framebuffer->m_size.y));
         }
     }
 
@@ -13415,8 +13456,8 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
         SP<Render::IFramebuffer> renderFramebuffer = snapshot->framebuffer;
         bool                     blitRenderedFramebuffer = false;
         if (renderWorkspaceContents) {
-            const int renderFbWidth = std::max(1, static_cast<int>(std::ceil(static_cast<double>(monitor->m_size.x) * renderScaleForMonitor(monitor))));
-            const int renderFbHeight = std::max(1, static_cast<int>(std::ceil(static_cast<double>(monitor->m_size.y) * renderScaleForMonitor(monitor))));
+            const int renderFbWidth = std::max(1, static_cast<int>(std::lround(monitor->m_pixelSize.x)));
+            const int renderFbHeight = std::max(1, static_cast<int>(std::lround(monitor->m_pixelSize.y)));
             auto      fullSizeFramebuffer = createFramebuffer("hymission workspace strip full snapshot");
             if (fullSizeFramebuffer && fullSizeFramebuffer->alloc(renderFbWidth, renderFbHeight)) {
                 fullSizeFramebuffer->setImageDescription(monitor->workBufferImageDescription());
@@ -13427,7 +13468,7 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
             }
         }
 
-        CRegion fakeDamage{0, 0, static_cast<int>(std::lround(renderFramebuffer->m_size.x)), static_cast<int>(std::lround(renderFramebuffer->m_size.y))};
+        CRegion fakeDamage{0, 0, static_cast<int>(std::lround(monitor->m_transformedSize.x)), static_cast<int>(std::lround(monitor->m_transformedSize.y))};
         g_pHyprRenderer->beginFullFakeRender(monitor, fakeDamage, renderFramebuffer);
         g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.05, 0.06, 0.08, 1.0}}, fakeDamage);
         renderBackgroundLayers(renderNow);
@@ -13450,8 +13491,11 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
         g_pHyprRenderer->m_renderData.blockScreenShader = previousBlockScreenShader;
 
         if (blitRenderedFramebuffer) {
-            blitFramebufferRegion(*renderFramebuffer, *snapshot->framebuffer, makeRect(0.0, 0.0, renderFramebuffer->m_size.x, renderFramebuffer->m_size.y),
-                                  makeRect(0.0, 0.0, snapshot->framebuffer->m_size.x, snapshot->framebuffer->m_size.y));
+            const auto normalizedFramebuffer = normalizeMonitorFramebuffer(monitor, renderFramebuffer, "hymission normalized workspace strip snapshot");
+            if (normalizedFramebuffer)
+                blitFramebufferRegion(*normalizedFramebuffer, *snapshot->framebuffer,
+                                      makeRect(0.0, 0.0, normalizedFramebuffer->m_size.x, normalizedFramebuffer->m_size.y),
+                                      makeRect(0.0, 0.0, snapshot->framebuffer->m_size.x, snapshot->framebuffer->m_size.y));
         }
     }
     if (renderWorkspaceContents) {
