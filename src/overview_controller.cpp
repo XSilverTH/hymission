@@ -1212,6 +1212,8 @@ bool renderTextureIntoFramebuffer(const PHLMONITOR& monitor, const SP<Render::IF
         return false;
     }
 
+    g_pHyprRenderer->setViewport(0, 0, static_cast<int>(std::lround(targetFramebuffer->m_size.x)),
+                                 static_cast<int>(std::lround(targetFramebuffer->m_size.y)));
     g_pHyprRenderer->m_renderData.blockScreenShader = true;
     if (exportProjection)
         g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
@@ -13411,6 +13413,8 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
             return false;
         }
 
+        g_pHyprRenderer->setViewport(0, 0, static_cast<int>(std::lround(targetFramebuffer->m_size.x)),
+                                     static_cast<int>(std::lround(targetFramebuffer->m_size.y)));
         g_pHyprRenderer->m_renderData.blockScreenShader = true;
         // Window and layer geometry is already expressed in transformed monitor
         // space. Render it directly into the logical-orientation framebuffer.
@@ -13480,6 +13484,8 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
 
         CRegion fakeDamage{0, 0, static_cast<int>(std::lround(monitor->m_transformedSize.x)), static_cast<int>(std::lround(monitor->m_transformedSize.y))};
         g_pHyprRenderer->beginFullFakeRender(monitor, fakeDamage, renderFramebuffer);
+        g_pHyprRenderer->setViewport(0, 0, static_cast<int>(std::lround(renderFramebuffer->m_size.x)),
+                                     static_cast<int>(std::lround(renderFramebuffer->m_size.y)));
         g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
         g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.05, 0.06, 0.08, 1.0}}, fakeDamage);
         renderBackgroundLayers(renderNow);
