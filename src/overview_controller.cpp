@@ -1250,16 +1250,13 @@ SP<Render::IFramebuffer> normalizeMonitorFramebuffer(const PHLMONITOR& monitor, 
     setFramebufferLinearFiltering(*normalized);
     // Hyprland snapshots use the output's physical buffer dimensions. Convert
     // them back to transformed monitor space before logical crops or scaling.
-    // Texture transforms rotate the quad itself, so the unrotated quad must
-    // keep the physical dimensions and share the transformed target's center.
+    // Mat3x3::projectBox applies a texture transform inside the destination
+    // rectangle; it does not rotate that rectangle's dimensions. Therefore the
+    // destination must already use the transformed framebuffer size. Centering
+    // the physical-sized rectangle adds half the width/height delta as an
+    // artificial offset (344 px for a 2752x2064 -> 2064x2752 rotation).
     const auto inverseTransform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
-    const CBox sourceBox{
-        (static_cast<double>(width) - sourceFramebuffer->m_size.x) * 0.5,
-        (static_cast<double>(height) - sourceFramebuffer->m_size.y) * 0.5,
-        sourceFramebuffer->m_size.x,
-        sourceFramebuffer->m_size.y,
-    };
-    if (!renderTextureIntoFramebuffer(monitor, normalized, sourceFramebuffer->getTexture(), sourceBox, inverseTransform))
+    if (!renderTextureIntoFramebuffer(monitor, normalized, sourceFramebuffer->getTexture(), CBox{0, 0, width, height}, inverseTransform))
         return nullptr;
 
     return normalized;
