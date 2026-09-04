@@ -1214,8 +1214,12 @@ bool renderTextureIntoFramebuffer(const PHLMONITOR& monitor, const SP<Render::IF
     g_pHyprRenderer->setViewport(0, 0, static_cast<int>(std::lround(targetFramebuffer->m_size.x)),
                                  static_cast<int>(std::lround(targetFramebuffer->m_size.y)));
     g_pHyprRenderer->m_renderData.blockScreenShader = true;
-    // This is a framebuffer-to-framebuffer copy. Monitor projection would
-    // apply output scale/transform again and distort small crop targets.
+    // Match Hyprland's own arbitrary-size framebuffer path (getBackground):
+    // export projection uses framebuffer-local coordinates and its damage must
+    // not be transformed back into physical output orientation. Otherwise a
+    // 90-degree output constrains the copy to a width/height-swapped scissor.
+    g_pHyprRenderer->m_renderData.fbSize = targetFramebuffer->m_size;
+    g_pHyprRenderer->m_renderData.transformDamage = false;
     g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
     g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.0, 0.0, 0.0, 0.0}}, fakeDamage);
     const auto previousTextureTransform = texture->m_transform;
@@ -8452,7 +8456,6 @@ bool OverviewController::captureHiddenStripLayerProxy(const PHLLS& layer, const 
     const int fbHeight = std::max(1, static_cast<int>(std::ceil(proxyRectGlobal.height * renderScaleForMonitor(monitor))));
 
     g_pHyprOpenGL->makeEGLCurrent();
-    g_pHyprRenderer->makeSnapshotFB(layer);
     auto sourceFramebuffer = layerFramebufferFor(layer);
     if (!sourceFramebuffer || !sourceFramebuffer->isAllocated() || !sourceFramebuffer->getTexture()) {
         if (debugLogsEnabled()) {
@@ -8763,7 +8766,11 @@ void OverviewController::renderHiddenStripLayerProxies() const {
 }
 
 bool OverviewController::shouldSuppressSurfaceBlur(void* surfacePassThisptr) const {
-    if (!isAnimating())
+    // A strip snapshot is rendered into an arbitrary-size export framebuffer.
+    // Hyprland's blur path temporarily binds the monitor blur/main FBs, and
+    // CGLFramebuffer::bind() resets the viewport to monitor->m_pixelSize. On a
+    // rotated output that swaps the export viewport dimensions mid-pass.
+    if (!isAnimating() && !m_stripPreviewContext.active)
         return false;
 
     const auto* renderData = surfaceRenderDataMutable(surfacePassThisptr);
@@ -8814,6 +8821,13 @@ bool OverviewController::prepareSurfaceRenderData(void* surfacePassThisptr, cons
         renderData->alpha = managedPreviewAlphaFor(renderData->pWindow, snapshot.alpha);
         if (!isWindowFadingOut(renderData->pWindow))
             renderData->fadeAlpha = 1.0F;
+        if (m_stripPreviewContext.active) {
+            // needsLiveBlur()/needsPrecomputeBlur() are hooked as well, but the
+            // draw path reads this flag again. Keep the entire snapshot pass
+            // away from monitor-sized blur framebuffers.
+            renderData->blur = false;
+            renderData->blockBlurOptimization = true;
+        }
     }
 
     if (transformed && debugSurfaceLogsEnabled()) {
@@ -13418,6 +13432,8 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
         g_pHyprRenderer->m_renderData.blockScreenShader = true;
         // Window and layer geometry is already expressed in transformed monitor
         // space. Render it directly into the logical-orientation framebuffer.
+        g_pHyprRenderer->m_renderData.fbSize = targetFramebuffer->m_size;
+        g_pHyprRenderer->m_renderData.transformDamage = false;
         g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
         g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.05, 0.06, 0.08, 1.0}}, fakeDamage);
         renderBackgroundLayers(now);
@@ -13486,6 +13502,8 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
         g_pHyprRenderer->beginFullFakeRender(monitor, fakeDamage, renderFramebuffer);
         g_pHyprRenderer->setViewport(0, 0, static_cast<int>(std::lround(renderFramebuffer->m_size.x)),
                                      static_cast<int>(std::lround(renderFramebuffer->m_size.y)));
+        g_pHyprRenderer->m_renderData.fbSize = renderFramebuffer->m_size;
+        g_pHyprRenderer->m_renderData.transformDamage = false;
         g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
         g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.05, 0.06, 0.08, 1.0}}, fakeDamage);
         renderBackgroundLayers(renderNow);
