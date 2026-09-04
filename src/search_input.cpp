@@ -224,6 +224,17 @@ void launchApplication(AppState* state, std::string_view desktopId) {
             g_error_free(error);
         return;
     }
+    g_subprocess_wait_check_async(process, nullptr,
+        [](GObject* source, GAsyncResult* result, gpointer) {
+            GError* waitError = nullptr;
+            if (!g_subprocess_wait_check_finish(G_SUBPROCESS(source), result, &waitError)) {
+                const std::string message = waitError && waitError->message ? waitError->message : "uwsm rejected the application";
+                sendPacket('X', message);
+            }
+            if (waitError)
+                g_error_free(waitError);
+        },
+        state);
     g_object_unref(process);
 }
 
