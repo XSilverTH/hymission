@@ -3972,8 +3972,8 @@ double OverviewController::previewDecorationRoundingScale(const PHLMONITOR& moni
         return 1.0;
 
     const auto   fbSize = m_stripPreviewContext.framebufferSize;
-    const double monitorPixelWidth = std::max(1.0, static_cast<double>(monitor->m_pixelSize.x));
-    const double monitorPixelHeight = std::max(1.0, static_cast<double>(monitor->m_pixelSize.y));
+    const double monitorPixelWidth = std::max(1.0, static_cast<double>(monitor->m_transformedSize.x));
+    const double monitorPixelHeight = std::max(1.0, static_cast<double>(monitor->m_transformedSize.y));
     return std::clamp(std::min(fbSize.x / monitorPixelWidth, fbSize.y / monitorPixelHeight), 0.0, 1.0);
 }
 
@@ -13412,6 +13412,9 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
         }
 
         g_pHyprRenderer->m_renderData.blockScreenShader = true;
+        // Window and layer geometry is already expressed in transformed monitor
+        // space. Render it directly into the logical-orientation framebuffer.
+        g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
         g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.05, 0.06, 0.08, 1.0}}, fakeDamage);
         renderBackgroundLayers(now);
         g_pHyprRenderer->endRender();
@@ -13446,16 +13449,15 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
     const auto renderNow = Time::steadyNow();
     bool       renderedScaledBackgroundOnly = false;
     if (!renderWorkspaceContents) {
-        const int backgroundFbWidth = std::max(1, static_cast<int>(std::lround(monitor->m_pixelSize.x)));
-        const int backgroundFbHeight = std::max(1, static_cast<int>(std::lround(monitor->m_pixelSize.y)));
+        const int backgroundFbWidth = std::max(1, static_cast<int>(std::lround(monitor->m_transformedSize.x)));
+        const int backgroundFbHeight = std::max(1, static_cast<int>(std::lround(monitor->m_transformedSize.y)));
         auto      backgroundFramebuffer = createFramebuffer("hymission workspace strip background");
         if (backgroundFramebuffer && backgroundFramebuffer->alloc(backgroundFbWidth, backgroundFbHeight)) {
             backgroundFramebuffer->setImageDescription(monitor->workBufferImageDescription());
             setFramebufferLinearFiltering(*backgroundFramebuffer);
-            const auto renderedBackground = renderBackgroundLayersIntoFramebuffer(backgroundFramebuffer, renderNow) ?
-                normalizeMonitorFramebuffer(monitor, backgroundFramebuffer, "hymission normalized workspace strip background") : nullptr;
-            renderedScaledBackgroundOnly = renderedBackground &&
-                blitFramebufferRegion(*renderedBackground, *snapshot->framebuffer, makeRect(0.0, 0.0, renderedBackground->m_size.x, renderedBackground->m_size.y),
+            renderedScaledBackgroundOnly = renderBackgroundLayersIntoFramebuffer(backgroundFramebuffer, renderNow) &&
+                blitFramebufferRegion(*backgroundFramebuffer, *snapshot->framebuffer,
+                                      makeRect(0.0, 0.0, backgroundFramebuffer->m_size.x, backgroundFramebuffer->m_size.y),
                                       makeRect(0.0, 0.0, snapshot->framebuffer->m_size.x, snapshot->framebuffer->m_size.y));
         }
     }
@@ -13464,8 +13466,8 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
         SP<Render::IFramebuffer> renderFramebuffer = snapshot->framebuffer;
         bool                     blitRenderedFramebuffer = false;
         if (renderWorkspaceContents) {
-            const int renderFbWidth = std::max(1, static_cast<int>(std::lround(monitor->m_pixelSize.x)));
-            const int renderFbHeight = std::max(1, static_cast<int>(std::lround(monitor->m_pixelSize.y)));
+            const int renderFbWidth = std::max(1, static_cast<int>(std::lround(monitor->m_transformedSize.x)));
+            const int renderFbHeight = std::max(1, static_cast<int>(std::lround(monitor->m_transformedSize.y)));
             auto      fullSizeFramebuffer = createFramebuffer("hymission workspace strip full snapshot");
             if (fullSizeFramebuffer && fullSizeFramebuffer->alloc(renderFbWidth, renderFbHeight)) {
                 fullSizeFramebuffer->setImageDescription(monitor->workBufferImageDescription());
@@ -13478,6 +13480,7 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
 
         CRegion fakeDamage{0, 0, static_cast<int>(std::lround(monitor->m_transformedSize.x)), static_cast<int>(std::lround(monitor->m_transformedSize.y))};
         g_pHyprRenderer->beginFullFakeRender(monitor, fakeDamage, renderFramebuffer);
+        g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
         g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.05, 0.06, 0.08, 1.0}}, fakeDamage);
         renderBackgroundLayers(renderNow);
         if (renderWorkspaceContents && renderWindowFn) {
@@ -13499,11 +13502,9 @@ void OverviewController::renderWorkspaceStripSnapshot(WorkspaceStripEntry& entry
         g_pHyprRenderer->m_renderData.blockScreenShader = previousBlockScreenShader;
 
         if (blitRenderedFramebuffer) {
-            const auto normalizedFramebuffer = normalizeMonitorFramebuffer(monitor, renderFramebuffer, "hymission normalized workspace strip snapshot");
-            if (normalizedFramebuffer)
-                blitFramebufferRegion(*normalizedFramebuffer, *snapshot->framebuffer,
-                                      makeRect(0.0, 0.0, normalizedFramebuffer->m_size.x, normalizedFramebuffer->m_size.y),
-                                      makeRect(0.0, 0.0, snapshot->framebuffer->m_size.x, snapshot->framebuffer->m_size.y));
+            blitFramebufferRegion(*renderFramebuffer, *snapshot->framebuffer,
+                                  makeRect(0.0, 0.0, renderFramebuffer->m_size.x, renderFramebuffer->m_size.y),
+                                  makeRect(0.0, 0.0, snapshot->framebuffer->m_size.x, snapshot->framebuffer->m_size.y));
         }
     }
     if (renderWorkspaceContents) {
