@@ -34,6 +34,7 @@ src = [
 ]
 
 glib_dep = dependency('glib-2.0')
+gio_unix_dep = dependency('gio-unix-2.0')
 
 shared_module(meson.project_name(), src,
   dependencies: [
@@ -45,7 +46,7 @@ shared_module(meson.project_name(), src,
 )
 
 executable('hymission-search-input', 'src/search_input.cpp',
-  dependencies: [dependency('gtk4'), dependency('gtk4-layer-shell-0')],
+  dependencies: [dependency('gtk4'), dependency('gtk4-layer-shell-0'), gio_unix_dep],
   install: true,
   install_dir: get_option('libexecdir'),
 )

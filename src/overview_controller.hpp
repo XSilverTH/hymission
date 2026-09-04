@@ -280,6 +280,13 @@ class OverviewController {
         SpatialPickMap            map;
     };
 
+    struct ApplicationResult {
+        std::string               desktopId;
+        std::string               name;
+        std::string               iconPath;
+        SP<Render::ITexture>      iconTexture;
+    };
+
     struct State {
         Phase                                  phase = Phase::Inactive;
         PHLMONITOR                             ownerMonitor;
@@ -797,6 +804,15 @@ class OverviewController {
     void               sendSearchResultCount() const;
     void               notifySearchFailureOnce(const std::string& message);
     [[nodiscard]] bool windowMatchesActiveSearch(const PHLWINDOW& window) const;
+    void               applyApplicationResults(std::string payload);
+    void               launchSelectedApplication();
+    [[nodiscard]] bool  moveApplicationSelection(int step, const char* source = "?");
+    [[nodiscard]] Rect  overviewBaseContentRectForMonitor(const PHLMONITOR& monitor, const State& state) const;
+    [[nodiscard]] Rect  applicationResultsBandForMonitor(const PHLMONITOR& monitor, const State& state) const;
+    [[nodiscard]] std::vector<Rect> applicationResultRectsForMonitor(const PHLMONITOR& monitor, const State& state) const;
+    [[nodiscard]] std::optional<std::size_t> hitTestApplicationResult(double x, double y) const;
+    void               renderApplicationResults() const;
+    void               selectApplicationResult(std::size_t index);
     [[nodiscard]] const SpatialPickMap& spatialPickMapForCurrentState() const;
     void notify(const std::string& message, const CHyprColor& color, float durationMs) const;
     void warnAboutDeprecatedExpansionConfig();
@@ -1029,6 +1045,10 @@ class OverviewController {
     CHyprSignalListener       m_keyboardListener;
     CHyprSignalListener       m_windowOpenListener;
     CHyprSignalListener       m_windowDestroyListener;
+    std::vector<ApplicationResult> m_applicationResults;
+    std::optional<std::size_t>     m_selectedApplication;
+    std::optional<std::size_t>     m_hoveredApplication;
+    std::optional<std::size_t>     m_pressedApplication;
     CHyprSignalListener       m_windowCloseListener;
     CHyprSignalListener       m_windowActiveListener;
     CHyprSignalListener       m_windowMoveWorkspaceListener;

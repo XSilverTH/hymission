@@ -119,6 +119,7 @@ class OverviewOverlayPassElement final : public IPassElement {
         m_controller->refreshDraggedWindowCompositeTexture();
         m_controller->renderHiddenStripLayerProxies();
         m_controller->renderSelectionChrome();
+        m_controller->renderApplicationResults();
         m_controller->renderCollapsedGroupLabels();
         m_controller->renderPickLabels();
         m_controller->renderCloseButtons();
@@ -3140,6 +3141,7 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
     updateHoveredFromPointer(false, false, false, false, "mouse-button-refresh");
     const auto effectiveHoveredStripIndex = m_state.hoveredStripIndex ? m_state.hoveredStripIndex : cachedHoveredStripIndex;
     const auto effectiveHoveredIndex = m_state.hoveredIndex;
+    const auto effectiveHoveredApplication = m_hoveredApplication;
 
     // Close-button click takes priority over tile selection. Fire on the
     // press edge so quick clicks feel snappy, then swallow the matching
@@ -3179,6 +3181,16 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
     }
 
     if (effectiveState == WL_POINTER_BUTTON_STATE_RELEASED) {
+        if (m_pressedApplication) {
+            const auto pressedApplication = m_pressedApplication;
+            m_pressedApplication.reset();
+            if (pressedApplication && pressedApplication == effectiveHoveredApplication) {
+                m_selectedApplication = pressedApplication;
+                m_state.selectedIndex.reset();
+                launchSelectedApplication();
+            }
+            return true;
+        }
         if (m_draggedWindowIndex && *m_draggedWindowIndex < m_state.windows.size()) {
             const auto  draggedIndex = *m_draggedWindowIndex;
             const auto  window = m_state.windows[draggedIndex].window;
@@ -3322,11 +3334,20 @@ bool OverviewController::handleMouseButton(const IPointer::SButtonEvent& event) 
         damageOwnedMonitors();
         return true;
     }
+    if (effectiveHoveredApplication && *effectiveHoveredApplication < m_applicationResults.size()) {
+        clearStripWindowDragState();
+        selectApplicationResult(*effectiveHoveredApplication);
+        m_pressedApplication = *effectiveHoveredApplication;
+        damageOwnedMonitors();
+        return true;
+    }
+
 
     if (effectiveHoveredIndex) {
         const auto pressedWindowIndex = m_state.engine == LayoutEngine::Thumbnail ? hitTestPreviewTarget(pointerBeforeUpdate.x, pointerBeforeUpdate.y).value_or(*effectiveHoveredIndex) :
                                                                                      *effectiveHoveredIndex;
         const auto previousSelectedWindow = selectedWindow();
+        m_selectedApplication.reset();
         m_state.selectedIndex = pressedWindowIndex;
         m_state.focusDuringOverview = m_state.windows[pressedWindowIndex].window;
         m_queuedOverviewSelectionTarget.reset();
@@ -3505,6 +3526,10 @@ bool OverviewController::startSearchInput() {
     m_searchPreeditActive = false;
     m_searchQuery.clear();
     m_searchNormalizedQuery.clear();
+    m_applicationResults.clear();
+    m_selectedApplication.reset();
+    m_hoveredApplication.reset();
+    m_pressedApplication.reset();
     clearPickLabelPrefixState();
 
     auto* loop = g_pCompositor && g_pCompositor->m_wlDisplay ? wl_display_get_event_loop(g_pCompositor->m_wlDisplay) : nullptr;
@@ -3527,6 +3552,10 @@ void OverviewController::stopSearchInput(bool clearSearchState) {
         m_searchActive = false;
         m_searchQuery.clear();
         m_searchNormalizedQuery.clear();
+        m_applicationResults.clear();
+        m_selectedApplication.reset();
+        m_hoveredApplication.reset();
+        m_pressedApplication.reset();
     }
     if (m_searchInputSource) {
         wl_event_source_remove(m_searchInputSource);
@@ -3558,6 +3587,7 @@ int OverviewController::handleSearchInputFd(uint32_t mask) {
     if (size <= 0)
         return 0;
 
+
     const std::string_view payload(packet.data() + 1, static_cast<std::size_t>(size - 1));
     switch (packet[0]) {
         case 'R':
@@ -3578,11 +3608,18 @@ int OverviewController::handleSearchInputFd(uint32_t mask) {
         case 'E':
             beginClose();
             break;
+        case 'D':
+            applyApplicationResults(std::string(payload));
+            break;
+        case 'X':
+            notifySearchFailureOnce(std::string("[hymission] application launch failed: ") + std::string(payload));
+            break;
         default:
             break;
     }
     return 0;
 }
+
 
 void OverviewController::applySearchQuery(std::string query) {
     if (!m_searchActive || query == m_searchQuery)
@@ -3608,6 +3645,111 @@ void OverviewController::applySearchQuery(std::string query) {
     sendSearchResultCount();
 }
 
+void OverviewController::applyApplicationResults(std::string payload) {
+    if (!m_searchActive)
+        return;
+
+    std::vector<ApplicationResult> next;
+    std::size_t start = 0;
+    while (start < payload.size()) {
+        const std::size_t end = payload.find('\n', start);
+        const std::size_t length = end == std::string::npos ? payload.size() - start : end - start;
+        const std::string_view record(payload.data() + start, length);
+        const std::size_t firstTab = record.find('\t');
+        const std::size_t secondTab = firstTab == std::string_view::npos ? std::string_view::npos : record.find('\t', firstTab + 1);
+        if (firstTab != std::string_view::npos && secondTab != std::string_view::npos && firstTab > 0 && secondTab > firstTab + 1) {
+            ApplicationResult result{
+                .desktopId = std::string(record.substr(0, firstTab)),
+                .name = std::string(record.substr(firstTab + 1, secondTab - firstTab - 1)),
+                .iconPath = std::string(record.substr(secondTab + 1)),
+            };
+            if (!result.desktopId.empty() && !result.name.empty()) {
+                if (!result.iconPath.empty() && g_pHyprRenderer)
+                    result.iconTexture = g_pHyprRenderer->loadAsset(result.iconPath);
+                next.push_back(std::move(result));
+            }
+        }
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+
+    bool same = next.size() == m_applicationResults.size();
+    if (same) {
+        for (std::size_t index = 0; index < next.size(); ++index) {
+            if (next[index].desktopId != m_applicationResults[index].desktopId || next[index].name != m_applicationResults[index].name ||
+                next[index].iconPath != m_applicationResults[index].iconPath) {
+                same = false;
+                break;
+            }
+        }
+    }
+    if (same)
+        return;
+
+    std::string selectedId;
+    if (m_selectedApplication && *m_selectedApplication < m_applicationResults.size())
+        selectedId = m_applicationResults[*m_selectedApplication].desktopId;
+    m_applicationResults = std::move(next);
+    m_selectedApplication.reset();
+    if (!m_applicationResults.empty()) {
+        const auto it = std::find_if(m_applicationResults.begin(), m_applicationResults.end(),
+                                     [&](const ApplicationResult& result) { return result.desktopId == selectedId; });
+        m_selectedApplication = it == m_applicationResults.end() ? 0U : static_cast<std::size_t>(std::distance(m_applicationResults.begin(), it));
+        m_state.selectedIndex.reset();
+        m_state.hoveredIndex.reset();
+    }
+    m_hoveredApplication.reset();
+    m_pressedApplication.reset();
+    rebuildVisibleState({}, false);
+    damageOwnedMonitors();
+}
+
+void OverviewController::launchSelectedApplication() {
+    if (!m_selectedApplication || *m_selectedApplication >= m_applicationResults.size() || m_searchInputFd < 0)
+        return;
+
+    const std::string packet = "L" + m_applicationResults[*m_selectedApplication].desktopId;
+    if (send(m_searchInputFd, packet.data(), packet.size(), MSG_NOSIGNAL) != static_cast<ssize_t>(packet.size())) {
+        notifySearchFailureOnce("[hymission] failed to request application launch");
+        return;
+    }
+    beginClose(CloseMode::Abort);
+}
+
+bool OverviewController::moveApplicationSelection(int step, const char* source) {
+    if (m_applicationResults.empty())
+        return false;
+    if (!m_selectedApplication) {
+        if (step < 0 || m_state.windows.empty()) {
+            m_selectedApplication = step < 0 ? m_applicationResults.size() - 1 : 0;
+            m_state.selectedIndex.reset();
+            damageOwnedMonitors();
+            return true;
+        }
+        return false;
+    }
+
+    const auto next = chooseCyclicIndex(m_applicationResults.size(), *m_selectedApplication, step);
+    if (!next || *next == *m_selectedApplication)
+        return true;
+    m_selectedApplication = *next;
+    m_state.selectedIndex.reset();
+    if (debugLogsEnabled())
+        debugLog(std::string("[hymission] application selection source=") + (source ? source : "?"));
+    damageOwnedMonitors();
+    return true;
+}
+
+
+
+void OverviewController::selectApplicationResult(std::size_t index) {
+    if (index >= m_applicationResults.size())
+        return;
+    m_selectedApplication = index;
+    m_state.selectedIndex.reset();
+    damageOwnedMonitors();
+}
 void OverviewController::sendSearchResultCount() const {
     if (!m_searchActive || m_searchInputFd < 0)
         return;
@@ -7834,18 +7976,14 @@ Rect OverviewController::workspaceStripBandRectForMonitor(const PHLMONITOR& moni
     return makeRect(reservation.band.x, reservation.band.y, reservation.band.width, reservation.band.height);
 }
 
-Rect OverviewController::overviewContentRectForMonitor(const PHLMONITOR& monitor, const State& state) const {
+Rect OverviewController::overviewBaseContentRectForMonitor(const PHLMONITOR& monitor, const State& state) const {
     if (!monitor)
         return {};
 
-    // Subtract layer-shell exclusive zones (e.g. waybar / quickshell-dms top
-    // bars and bottom docks) so preview tiles don't render under them. The
-    // user's outer_padding_* values still apply on top of this.
     const double reservedTop    = monitor->m_reservedArea.top();
     const double reservedRight  = monitor->m_reservedArea.right();
     const double reservedBottom = monitor->m_reservedArea.bottom();
     const double reservedLeft   = monitor->m_reservedArea.left();
-
     const Rect available = makeRect(reservedLeft, reservedTop,
                                     std::max(1.0, monitor->m_size.x - reservedLeft - reservedRight),
                                     std::max(1.0, monitor->m_size.y - reservedTop - reservedBottom));
@@ -7857,6 +7995,55 @@ Rect OverviewController::overviewContentRectForMonitor(const PHLMONITOR& monitor
                                                        parseWorkspaceStripAnchor(workspaceStripAnchor()), workspaceStripThickness(monitor), workspaceStripGap());
     return makeRect(reservation.content.x, reservation.content.y, reservation.content.width, reservation.content.height);
 }
+
+Rect OverviewController::applicationResultsBandForMonitor(const PHLMONITOR& monitor, const State& state) const {
+    if (!monitor || monitor != m_state.ownerMonitor || m_applicationResults.empty() || !m_searchActive || m_searchNormalizedQuery.empty())
+        return {};
+
+    const Rect content = overviewBaseContentRectForMonitor(monitor, state);
+    if (content.width <= 1.0 || content.height <= 1.0)
+        return {};
+
+    const std::size_t columns = std::max<std::size_t>(1, std::min<std::size_t>(
+        m_applicationResults.size(), static_cast<std::size_t>(std::max(1.0, std::floor(content.width / 190.0)))));
+    const std::size_t rows = (m_applicationResults.size() + columns - 1) / columns;
+    const double height = std::min(content.height * 0.42, 24.0 + static_cast<double>(rows) * 70.0);
+    return makeRect(monitor->m_position.x + content.x, monitor->m_position.y + content.y, content.width, height);
+}
+
+std::vector<Rect> OverviewController::applicationResultRectsForMonitor(const PHLMONITOR& monitor, const State& state) const {
+    std::vector<Rect> rects;
+    const Rect band = applicationResultsBandForMonitor(monitor, state);
+    if (band.width <= 1.0 || band.height <= 1.0)
+        return rects;
+
+    const Rect content = overviewBaseContentRectForMonitor(monitor, state);
+    const std::size_t columns = std::max<std::size_t>(1, std::min<std::size_t>(
+        m_applicationResults.size(), static_cast<std::size_t>(std::max(1.0, std::floor(content.width / 190.0)))));
+    const double gap = 10.0;
+    const double cardWidth = std::max(1.0, (band.width - gap * static_cast<double>(columns - 1)) / static_cast<double>(columns));
+    const double cardHeight = 58.0;
+    rects.reserve(m_applicationResults.size());
+    for (std::size_t index = 0; index < m_applicationResults.size(); ++index) {
+        const std::size_t row = index / columns;
+        const std::size_t column = index % columns;
+        rects.push_back(makeRect(band.x + static_cast<double>(column) * (cardWidth + gap),
+                                 band.y + 18.0 + static_cast<double>(row) * 70.0, cardWidth, cardHeight));
+    }
+    return rects;
+}
+
+Rect OverviewController::overviewContentRectForMonitor(const PHLMONITOR& monitor, const State& state) const {
+    Rect content = overviewBaseContentRectForMonitor(monitor, state);
+    const Rect appBand = applicationResultsBandForMonitor(monitor, state);
+    if (appBand.width > 1.0 && appBand.height > 1.0) {
+        const double localBottom = appBand.y - monitor->m_position.y + appBand.height + 10.0;
+        content.y = std::min(content.y + content.height - 1.0, localBottom);
+        content.height = std::max(1.0, monitor->m_size.y - monitor->m_reservedArea.bottom() - content.y);
+    }
+    return content;
+}
+
 
 std::vector<Rect> OverviewController::stripRects() const {
     std::vector<Rect> rects;
@@ -9160,6 +9347,7 @@ double OverviewController::draggedPreviewTargetScaleForHover() const {
     if (!referenceEntry) {
         const auto it = std::find_if(m_state.stripEntries.begin(), m_state.stripEntries.end(),
                                      [&](const WorkspaceStripEntry& entry) { return entry.monitor == dragged.targetMonitor && entry.rect.width > 1.0; });
+
         if (it != m_state.stripEntries.end())
             referenceEntry = &*it;
     }
@@ -9322,6 +9510,17 @@ std::optional<std::size_t> OverviewController::hitTestStripTarget(double x, doub
     return hitTestWorkspaceStrip(stripRects(), x, y);
 }
 
+std::optional<std::size_t> OverviewController::hitTestApplicationResult(double x, double y) const {
+    if (!m_searchActive || m_searchNormalizedQuery.empty() || m_applicationResults.empty() || !m_state.ownerMonitor)
+        return std::nullopt;
+    const auto rects = applicationResultRectsForMonitor(m_state.ownerMonitor, m_state);
+    for (std::size_t index = 0; index < rects.size(); ++index) {
+        if (rectContainsPoint(rects[index], x, y))
+            return index;
+    }
+    return std::nullopt;
+}
+
 std::optional<Rect> OverviewController::workspaceTransitionRectForWindow(const PHLWINDOW& window) const {
     if (!m_workspaceTransition.active)
         return std::nullopt;
@@ -9330,6 +9529,7 @@ std::optional<Rect> OverviewController::workspaceTransitionRectForWindow(const P
     const auto* targetManaged = managedWindowFor(m_workspaceTransition.targetState, window, true);
     if (!sourceManaged && !targetManaged)
         return std::nullopt;
+
 
     const double clampedDelta = std::clamp(m_workspaceTransition.delta, -m_workspaceTransition.distance, m_workspaceTransition.distance);
     const double sourceOffset = -clampedDelta;
@@ -11628,17 +11828,32 @@ void OverviewController::updateHoveredFromPointer(bool syncSelection, bool syncR
     const auto previousHoveredStrip = m_state.hoveredStripIndex;
     const auto previousHovered = m_state.hoveredIndex;
     const auto previousSelected = m_state.selectedIndex;
+    const auto previousHoveredApplication = m_hoveredApplication;
+    const auto previousSelectedApplication = m_selectedApplication;
     const auto previousFocus = m_state.focusDuringOverview;
     const auto now = std::chrono::steady_clock::now();
 
     m_state.hoveredStripIndex = hitTestStripTarget(pointer.x, pointer.y);
+    m_hoveredApplication = !draggingWindow && !m_state.hoveredStripIndex ? hitTestApplicationResult(pointer.x, pointer.y) : std::nullopt;
     m_state.hoveredCloseIndex = draggingWindow ? std::optional<std::size_t>{} : hitTestCloseButton(pointer.x, pointer.y);
     if (draggingWindow) {
         m_state.hoveredIndex.reset();
         if (!m_state.hoveredStripIndex && m_draggedWindowIndex)
             m_state.hoveredIndex = hitTestThumbnailDropTarget(pointer.x, pointer.y, *m_draggedWindowIndex);
+    } else if (m_hoveredApplication) {
+        m_state.hoveredIndex.reset();
+        if (syncSelection) {
+            m_selectedApplication = m_hoveredApplication;
+            m_state.selectedIndex.reset();
+        }
+    } else if (m_state.hoveredStripIndex) {
+        m_state.hoveredIndex.reset();
+        if (syncSelection)
+            m_selectedApplication.reset();
     } else {
-        m_state.hoveredIndex = m_state.hoveredStripIndex ? std::optional<std::size_t>{} : hitTestTarget(pointer.x, pointer.y);
+        m_state.hoveredIndex = hitTestTarget(pointer.x, pointer.y);
+        if (syncSelection)
+            m_selectedApplication.reset();
     }
 
     if (draggingWindow) {
@@ -11794,8 +12009,8 @@ void OverviewController::updateHoveredFromPointer(bool syncSelection, bool syncR
     }
 
     if (previousHoveredStrip != m_state.hoveredStripIndex || previousHovered != m_state.hoveredIndex || previousSelected != m_state.selectedIndex ||
-        previousFocus != m_state.focusDuringOverview) {
-        if (!draggingWindow && (previousHovered != m_state.hoveredIndex || previousSelected != m_state.selectedIndex))
+        previousHoveredApplication != m_hoveredApplication || previousSelectedApplication != m_selectedApplication || previousFocus != m_state.focusDuringOverview) {
+        if (!draggingWindow && !m_hoveredApplication && (previousHovered != m_state.hoveredIndex || previousSelected != m_state.selectedIndex))
             updateSelectedWindowLayout({});
         if (draggingWindow && previousHoveredStrip != m_state.hoveredStripIndex) {
             m_stripSnapshotsDirty = true;
@@ -12079,6 +12294,11 @@ void OverviewController::rebuildVisibleState(PHLWINDOW preferredSelectedWindow, 
 }
 
 void OverviewController::moveSelection(Direction direction) {
+    if (m_searchActive && m_selectedApplication && !m_applicationResults.empty()) {
+        const int step = direction == Direction::Left || direction == Direction::Up ? -1 : 1;
+        (void)moveApplicationSelection(step, "keyboard-direction");
+        return;
+    }
     if (m_state.windows.empty())
         return;
 
@@ -12099,9 +12319,23 @@ void OverviewController::moveSelection(Direction direction) {
 }
 
 bool OverviewController::moveSelectionCircular(int step, const char* source) {
+    if (m_searchActive && !m_applicationResults.empty()) {
+        if (m_selectedApplication) {
+            if (step > 0 && !m_state.windows.empty()) {
+                m_selectedApplication.reset();
+                m_state.selectedIndex = 0;
+                syncFocusDuringOverviewFromSelection(true, source);
+                damageOwnedMonitors();
+                return true;
+            }
+            return moveApplicationSelection(step, source);
+        }
+        if (step < 0 || m_state.windows.empty())
+            return moveApplicationSelection(step, source);
+    }
+
     if (m_state.windows.size() < 2)
         return false;
-
     if (!m_state.selectedIndex || *m_state.selectedIndex >= m_state.windows.size())
         m_state.selectedIndex = 0;
 
@@ -12114,14 +12348,16 @@ bool OverviewController::moveSelectionCircular(int step, const char* source) {
     damageOwnedMonitors();
     return true;
 }
-
 void OverviewController::activateSelection() {
+    if (m_selectedApplication) {
+        launchSelectedApplication();
+        return;
+    }
     if (!m_state.selectedIndex || *m_state.selectedIndex >= m_state.windows.size())
         return;
 
     beginClose(CloseMode::ActivateSelection);
 }
-
 void OverviewController::resolvePickSelection(std::size_t orderIndex) {
     const auto order = pickOrderForCurrentState();
     if (orderIndex >= order.size() || order[orderIndex] >= m_state.windows.size())
@@ -13606,6 +13842,67 @@ void OverviewController::scheduleWorkspaceStripSnapshotRefresh() {
 
         refreshWorkspaceStripSnapshots();
     });
+}
+
+void OverviewController::renderApplicationResults() const {
+    if (!m_searchActive || m_searchNormalizedQuery.empty() || m_applicationResults.empty())
+        return;
+
+    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    if (!monitor || monitor != m_state.ownerMonitor)
+        return;
+
+    const double progress = visualProgress();
+    const Rect bandGlobal = applicationResultsBandForMonitor(monitor, m_state);
+    if (progress <= 0.0 || bandGlobal.width <= 1.0 || bandGlobal.height <= 1.0)
+        return;
+
+    const Rect band = rectToMonitorRenderLocal(bandGlobal, monitor);
+    g_pHyprOpenGL->renderRect(toBox(band), colorWithAlphaMultiplier(CHyprColor(0.04, 0.05, 0.08, 0.94), progress),
+                              {.round = static_cast<int>(std::lround(scaleLengthForRender(monitor, 12.0)))});
+
+    if (const auto heading = g_pHyprRenderer->renderText("Applications", colorWithAlphaMultiplier(focusTitleColor(), progress),
+                                                          scaleFontSizeForRender(monitor, 13), false, "", static_cast<int>(band.width)); heading) {
+        g_pHyprOpenGL->renderTexture(heading, toBox(makeRect(band.x + scaleLengthForRender(monitor, 12.0),
+                                                             band.y + scaleLengthForRender(monitor, 2.0), heading->m_size.x, heading->m_size.y)), {});
+    }
+
+    const auto rects = applicationResultRectsForMonitor(monitor, m_state);
+    for (std::size_t index = 0; index < rects.size() && index < m_applicationResults.size(); ++index) {
+        const Rect card = rectToMonitorRenderLocal(rects[index], monitor);
+        const bool selected = m_selectedApplication && *m_selectedApplication == index;
+        const bool hovered = m_hoveredApplication && *m_hoveredApplication == index;
+        g_pHyprOpenGL->renderRect(toBox(card), colorWithAlphaMultiplier(
+            selected ? CHyprColor(0.12, 0.28, 0.42, 0.98) : CHyprColor(0.10, 0.12, 0.17, 0.96), progress),
+            {.round = static_cast<int>(std::lround(scaleLengthForRender(monitor, 8.0)))});
+        if (selected || hovered)
+            renderOutline(rects[index], colorWithAlphaMultiplier(selected ? focusSelectedColor() : focusHoverColor(), progress), selected ? 2.0 : 1.0);
+
+        const double iconSize = scaleLengthForRender(monitor, 32.0);
+        const Rect icon = makeRect(card.x + scaleLengthForRender(monitor, 10.0), card.y + (card.height - iconSize) * 0.5, iconSize, iconSize);
+        const auto& result = m_applicationResults[index];
+        if (result.iconTexture) {
+            g_pHyprOpenGL->renderTexture(result.iconTexture, toBox(icon), {});
+        } else {
+            g_pHyprOpenGL->renderRect(toBox(icon), colorWithAlphaMultiplier(focusSelectedColor(), progress * 0.72),
+                                      {.round = static_cast<int>(std::lround(iconSize * 0.22))});
+            const std::string initial = result.name.empty() ? "?" : result.name.substr(0, 1);
+            if (const auto initialTexture = g_pHyprRenderer->renderText(initial, colorWithAlphaMultiplier(focusTitleColor(), progress),
+                                                                         scaleFontSizeForRender(monitor, 16), false, "", static_cast<int>(iconSize)); initialTexture) {
+                g_pHyprOpenGL->renderTexture(initialTexture, toBox(makeRect(icon.x + (icon.width - initialTexture->m_size.x) * 0.5,
+                                                                            icon.y + (icon.height - initialTexture->m_size.y) * 0.5,
+                                                                            initialTexture->m_size.x, initialTexture->m_size.y)), {});
+            }
+        }
+
+        const int maxWidth = std::max(1, static_cast<int>(card.width - scaleLengthForRender(monitor, 54.0)));
+        if (const auto label = g_pHyprRenderer->renderText(result.name, colorWithAlphaMultiplier(focusTitleColor(), progress),
+                                                            scaleFontSizeForRender(monitor, 14), false, "", maxWidth); label) {
+            g_pHyprOpenGL->renderTexture(label, toBox(makeRect(card.x + scaleLengthForRender(monitor, 52.0),
+                                                                card.y + (card.height - label->m_size.y) * 0.5,
+                                                                std::min<double>(label->m_size.x, maxWidth), label->m_size.y)), {});
+        }
+    }
 }
 
 void OverviewController::renderWorkspaceStrip() const {

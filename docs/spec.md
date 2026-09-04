@@ -278,13 +278,14 @@ gesture-only 参数：
 - `pick_labels_enabled = 0` 时，overview 打开即透明启动并聚焦搜索输入 helper；首个直接字符或 IME preedit 出现时显示顶部居中的搜索条，首键不得丢失
 - `pick_labels_enabled = 1` 时保持 label 模式，按 `/` 切换到搜索；`/` 的搜索入口优先于 spatial label 路径
 - 搜索按当前 overview scope 重新收集窗口，对标题和 class 执行 Unicode normalization 与 casefold 后的包含匹配
+- 搜索查询非空时，现有 helper 同时返回 GIO desktop application 结果；应用按名称、generic name、desktop-file ID 和 keywords 匹配，隐藏和 `NoDisplay` 条目不显示，结果按稳定名称顺序排列
+- 应用结果在 overview overlay 中使用独立的 Applications 卡片组显示，和 Windows preview 分组区分；没有打开窗口的应用仍可被选择
 - expanded group 逐成员过滤；collapsed group 任一成员命中即保留该组，并展示首个命中成员
 - 过滤后按既有 layout 重排；仍匹配的当前选择优先保留，否则选择视觉顺序第一项
 - 查询清空时恢复全部 scope 内窗口但保持搜索模式；零结果时 overview 与搜索条保持打开并显示 `0 results`
 - 搜索模式中不渲染或处理 label，也不保留 sequential/spatial 前缀状态；Backspace、Delete 与光标编辑由 helper 处理
-- `Esc` 退出 overview，`Return` 激活当前结果，方向键导航结果；IME preedit 活跃时这些候选操作先交给 IME，preedit 结束后恢复 overview 语义
-- helper 使用继承的 `AF_UNIX SOCK_SEQPACKET` socketpair 与插件通信，不开放外部 socket；helper 缺失、启动失败或异常退出时 overview 继续可用且不得吞字符或全局快捷键
-
+- `Esc` 退出 overview，`Return` 激活当前结果；选择应用时通过 helper 使用 `uwsm app -- <desktop-entry-id>` 启动，方向键导航结果；IME preedit 活跃时这些候选操作先交给 IME，preedit 结束后恢复 overview 语义
+- helper 使用继承的 `AF_UNIX SOCK_SEQPACKET` socketpair 与插件通信，不开放外部 socket；应用索引在 helper 中缓存，helper 缺失、启动失败或异常退出时 overview 继续可用且不得吞字符或全局快捷键
 ### 6.4 overview 打开期间的集合变化
 
 - 如果 overview 打开期间有窗口关闭、打开、移动 workspace 或 monitor，且该变化会影响当前 scope，overview 应重建当前可见状态

@@ -17,6 +17,8 @@
 **Referenced [hyprexpo](https://github.com/hyprwm/hyprland-plugins/tree/main/hyprexpo), [hycov](https://github.com/ernestoCruz05/hycov), and [Hyprspace](https://github.com/KZDKM/Hyprspace).**
 ## Features
 
+- GNOME-style application search inside the existing overview
+- Safe application launching through UWSM desktop-entry IDs
 - Mission Control-style overview with animated window previews
 - Scope control with default config scope, `onlycurrentworkspace`, and `forceall`
 - Mouse, keyboard, and trackpad-driven overview interaction
@@ -62,10 +64,9 @@ For local development, `hymission` uses CMake and outputs `build-cmake/libhymiss
 Requirements:
 
 - Hyprland development headers for the exact Hyprland build you are running
-- `cmake`
-- `pkg-config`
 - a C++23-capable compiler
 - GLib 2, GTK 4, and gtk4-layer-shell (used by the bundled Wayland IME search helper)
+- UWSM for launching application search results (`uwsm app -- <desktop-entry-id>`)
 
 `nlohmann/json` is bundled as a single header under `src/vendor/` (v3.12.0),
 so no system package is required. Do not re-add `find_package(nlohmann_json)`.
@@ -105,6 +106,17 @@ Build outputs:
 - Logic test: `build-cmake/hymission-overview-logic-test`
 
 ## Usage
+
+### Search
+
+The existing overview search field searches open windows by title and class and,
+when the query is non-empty, installed applications by name, generic name,
+desktop-file ID, and keywords. Applications appear in a separate card group above
+the unchanged window previews. Application cards can be selected with the mouse
+or Up/Down navigation; Return launches the selected desktop entry through
+`uwsm app -- <desktop-entry-id>`. The helper builds its GIO application index
+once outside the compositor render path, and hidden or `NoDisplay` entries are
+not shown. Clearing the query restores the normal overview.
 
 ### Dispatchers
 

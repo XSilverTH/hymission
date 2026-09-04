@@ -1,14 +1,29 @@
 #include <gtk/gtk.h>
 #include <gtk4-layer-shell.h>
+#include <gio/gdesktopappinfo.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 #include <sys/socket.h>
 #include <unistd.h>
 
 namespace {
 constexpr int IPC_FD = 3;
+constexpr std::size_t MAX_APP_RESULTS = 12;
+constexpr std::size_t MAX_PACKET_SIZE = 60000;
+
+struct ApplicationEntry {
+    std::string desktopId;
+    std::string name;
+    std::string iconPath;
+    std::string searchable;
+};
 
 struct AppState {
     GtkWindow*     window = nullptr;
@@ -19,12 +34,197 @@ struct AppState {
     std::string    preedit;
     std::size_t    cursor = 0;
     bool           revealed = false;
+    std::vector<ApplicationEntry> applications;
 };
 
 bool sendPacket(char type, const std::string& payload = {}) {
     std::string packet(1, type);
     packet += payload;
-    return send(IPC_FD, packet.data(), packet.size(), MSG_NOSIGNAL) == static_cast<ssize_t>(packet.size());
+    return packet.size() <= MAX_PACKET_SIZE &&
+        send(IPC_FD, packet.data(), packet.size(), MSG_NOSIGNAL) == static_cast<ssize_t>(packet.size());
+}
+
+std::string normalizeText(const char* value) {
+    if (!value || !*value)
+        return {};
+    gchar* normalized = g_utf8_normalize(value, -1, G_NORMALIZE_ALL);
+    if (!normalized)
+        return {};
+    gchar* folded = g_utf8_casefold(normalized, -1);
+    g_free(normalized);
+    if (!folded)
+        return {};
+    std::string result(folded);
+    g_free(folded);
+    return result;
+}
+
+std::string sanitizeField(std::string value) {
+    std::replace(value.begin(), value.end(), '\t', ' ');
+    std::replace(value.begin(), value.end(), '\r', ' ');
+    std::replace(value.begin(), value.end(), '\n', ' ');
+    return value;
+}
+
+std::string iconPathFor(GDesktopAppInfo* info) {
+    if (!info)
+        return {};
+
+    GIcon* icon = g_app_info_get_icon(G_APP_INFO(info));
+    if (!icon)
+        return {};
+
+    std::vector<std::string> names;
+    if (G_IS_FILE_ICON(icon)) {
+        if (GFile* file = g_file_icon_get_file(G_FILE_ICON(icon))) {
+            if (gchar* path = g_file_get_path(file)) {
+                std::string result(path);
+                g_free(path);
+                return result;
+            }
+        }
+    } else if (G_IS_THEMED_ICON(icon)) {
+        for (const char* const* name = g_themed_icon_get_names(G_THEMED_ICON(icon)); name && *name; ++name)
+            names.emplace_back(*name);
+    }
+
+    std::vector<std::filesystem::path> roots;
+    if (const char* userData = g_get_user_data_dir(); userData && *userData)
+        roots.emplace_back(userData);
+    for (const char* const* systemData = g_get_system_data_dirs(); systemData && *systemData; ++systemData)
+        roots.emplace_back(*systemData);
+    roots.emplace_back("/usr/share");
+
+    const std::array<std::string_view, 8> sizes = {"scalable", "512x512", "256x256", "128x128", "96x96", "64x64", "48x48", "32x32"};
+    const std::array<std::string_view, 3> extensions = {".png", ".svg", ".xpm"};
+    std::error_code error;
+    for (const auto& root : roots) {
+        for (const auto& name : names) {
+            for (const auto& size : sizes) {
+                const auto directory = root / "icons" / "hicolor" / size / "apps";
+                for (const auto& extension : extensions) {
+                    const auto candidate = directory / (name + std::string(extension));
+                    if (std::filesystem::is_regular_file(candidate, error))
+                        return candidate.string();
+                }
+            }
+            for (const auto& extension : extensions) {
+                const auto candidate = root / "pixmaps" / (name + std::string(extension));
+                if (std::filesystem::is_regular_file(candidate, error))
+                    return candidate.string();
+            }
+        }
+    }
+    return {};
+}
+
+bool visibleInCurrentDesktop(GDesktopAppInfo* info) {
+    const char* desktops = g_getenv("XDG_CURRENT_DESKTOP");
+    if (!desktops || !*desktops)
+        return true;
+
+    std::string value(desktops);
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const std::size_t end = value.find(':', start);
+        const std::string desktop = value.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!desktop.empty() && g_desktop_app_info_get_show_in(info, desktop.c_str()))
+            return true;
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return false;
+}
+
+void buildApplicationIndex(AppState* state) {
+    std::unordered_map<std::string, ApplicationEntry> byId;
+    GList* all = g_app_info_get_all();
+    for (GList* item = all; item; item = item->next) {
+        if (!item->data || !G_IS_DESKTOP_APP_INFO(item->data))
+            continue;
+
+        auto* info = G_DESKTOP_APP_INFO(item->data);
+        if (g_desktop_app_info_get_is_hidden(info) || g_desktop_app_info_get_nodisplay(info) || !visibleInCurrentDesktop(info))
+            continue;
+
+        const char* id = g_app_info_get_id(G_APP_INFO(info));
+        const char* name = g_app_info_get_name(G_APP_INFO(info));
+        if (!id || !*id || !name || !*name)
+            continue;
+
+        ApplicationEntry entry;
+        entry.desktopId = sanitizeField(id);
+        entry.name = sanitizeField(name);
+        entry.iconPath = sanitizeField(iconPathFor(info));
+        entry.searchable = normalizeText(name);
+
+        if (const char* generic = g_desktop_app_info_get_generic_name(info); generic && *generic)
+            entry.searchable += " " + normalizeText(generic);
+        if (const char* const* keywords = g_desktop_app_info_get_keywords(info)) {
+            for (const char* const* keyword = keywords; *keyword; ++keyword)
+                entry.searchable += " " + normalizeText(*keyword);
+        }
+        entry.searchable += " " + normalizeText(id);
+
+        const auto existing = byId.find(entry.desktopId);
+        if (existing == byId.end() || entry.name < existing->second.name)
+            byId[entry.desktopId] = std::move(entry);
+    }
+    g_list_free_full(all, g_object_unref);
+
+    state->applications.reserve(byId.size());
+    for (auto& [id, entry] : byId)
+        state->applications.push_back(std::move(entry));
+    std::sort(state->applications.begin(), state->applications.end(), [](const ApplicationEntry& lhs, const ApplicationEntry& rhs) {
+        const std::string lhsKey = normalizeText(lhs.name.c_str());
+        const std::string rhsKey = normalizeText(rhs.name.c_str());
+        if (lhsKey != rhsKey)
+            return lhsKey < rhsKey;
+        return lhs.desktopId < rhs.desktopId;
+    });
+}
+
+void sendApplicationResults(const AppState* state) {
+    std::string packet;
+    packet.reserve(4096);
+    packet.push_back('D');
+    const std::string query = normalizeText(state->query.c_str());
+    if (!query.empty()) {
+        std::size_t emitted = 0;
+        for (const auto& app : state->applications) {
+            if (!app.searchable.contains(query))
+                continue;
+            const std::string record = app.desktopId + "\t" + app.name + "\t" + app.iconPath + "\n";
+            if (packet.size() + record.size() > MAX_PACKET_SIZE)
+                break;
+            packet += record;
+            if (++emitted >= MAX_APP_RESULTS)
+                break;
+        }
+    }
+    send(IPC_FD, packet.data(), packet.size(), MSG_NOSIGNAL);
+}
+
+void launchApplication(AppState* state, std::string_view desktopId) {
+    const auto it = std::find_if(state->applications.begin(), state->applications.end(),
+                                 [&](const ApplicationEntry& app) { return app.desktopId == desktopId; });
+    if (it == state->applications.end()) {
+        sendPacket('X', "application is no longer available");
+        return;
+    }
+
+    const gchar* argv[] = {"uwsm", "app", "--", it->desktopId.c_str(), nullptr};
+    GError* error = nullptr;
+    GSubprocess* process = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_NONE, &error);
+    if (!process) {
+        const std::string message = error && error->message ? error->message : "unable to start uwsm";
+        sendPacket('X', message);
+        if (error)
+            g_error_free(error);
+        return;
+    }
+    g_object_unref(process);
 }
 
 void reveal(AppState* state) {
@@ -38,14 +238,17 @@ void updateLabel(AppState* state) {
     std::string shown = state->query;
     if (!state->preedit.empty())
         shown.insert(state->cursor, state->preedit);
-    gtk_label_set_text(state->queryLabel, shown.empty() ? "Search windows" : shown.c_str());
+    gtk_label_set_text(state->queryLabel, shown.empty() ? "Search windows and applications" : shown.c_str());
 }
 
 void publishQuery(AppState* state) {
     reveal(state);
     updateLabel(state);
-    if (!sendPacket('Q', state->query))
+    if (!sendPacket('Q', state->query)) {
         g_application_quit(g_application_get_default());
+        return;
+    }
+    sendApplicationResults(state);
 }
 
 void commitText(GtkIMContext*, const char* text, gpointer data) {
@@ -152,11 +355,14 @@ gboolean ipcReady(GIOChannel* channel, GIOCondition condition, gpointer data) {
     }
     if (packet[0] == 'C')
         gtk_label_set_text(state->countLabel, (std::string(packet.data() + 1, static_cast<std::size_t>(size - 1)) + " results").c_str());
+    else if (packet[0] == 'L')
+        launchApplication(state, std::string_view(packet.data() + 1, static_cast<std::size_t>(size - 1)));
     return G_SOURCE_CONTINUE;
 }
 
 void activate(GtkApplication* app, gpointer data) {
     auto* state = static_cast<AppState*>(data);
+    buildApplicationIndex(state);
     state->window = GTK_WINDOW(gtk_application_window_new(app));
     gtk_window_set_decorated(state->window, FALSE);
     gtk_layer_init_for_window(state->window);
@@ -168,7 +374,7 @@ void activate(GtkApplication* app, gpointer data) {
 
     auto* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_widget_add_css_class(box, "searchbar");
-    state->queryLabel = GTK_LABEL(gtk_label_new("Search windows"));
+    state->queryLabel = GTK_LABEL(gtk_label_new("Search windows and applications"));
     gtk_label_set_xalign(state->queryLabel, 0.0F);
     gtk_widget_set_size_request(GTK_WIDGET(state->queryLabel), 360, -1);
     state->countLabel = GTK_LABEL(gtk_label_new(""));
