@@ -1197,8 +1197,7 @@ bool blitFramebufferRegion(Render::IFramebuffer& sourceFramebuffer, Render::IFra
 }
 
 bool renderTextureIntoFramebuffer(const PHLMONITOR& monitor, const SP<Render::IFramebuffer>& targetFramebuffer, const SP<Render::ITexture>& texture,
-                                  const CBox& destinationBox, std::optional<eTransform> textureTransform = std::nullopt,
-                                  bool exportProjection = false) {
+                                  const CBox& destinationBox, std::optional<eTransform> textureTransform = std::nullopt) {
     if (!monitor || !g_pHyprRenderer || !g_pHyprOpenGL || !texture || !targetFramebuffer || !targetFramebuffer->isAllocated())
         return false;
 
@@ -1215,8 +1214,9 @@ bool renderTextureIntoFramebuffer(const PHLMONITOR& monitor, const SP<Render::IF
     g_pHyprRenderer->setViewport(0, 0, static_cast<int>(std::lround(targetFramebuffer->m_size.x)),
                                  static_cast<int>(std::lround(targetFramebuffer->m_size.y)));
     g_pHyprRenderer->m_renderData.blockScreenShader = true;
-    if (exportProjection)
-        g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
+    // This is a framebuffer-to-framebuffer copy. Monitor projection would
+    // apply output scale/transform again and distort small crop targets.
+    g_pHyprRenderer->setProjectionType(Render::RPT_EXPORT);
     g_pHyprRenderer->draw(CClearPassElement::SClearData{.color = CHyprColor{0.0, 0.0, 0.0, 0.0}}, fakeDamage);
     const auto previousTextureTransform = texture->m_transform;
     if (textureTransform)
@@ -1255,7 +1255,7 @@ SP<Render::IFramebuffer> normalizeMonitorFramebuffer(const PHLMONITOR& monitor, 
         sourceFramebuffer->m_size.x,
         sourceFramebuffer->m_size.y,
     };
-    if (!renderTextureIntoFramebuffer(monitor, normalized, sourceFramebuffer->getTexture(), sourceBox, inverseTransform, true))
+    if (!renderTextureIntoFramebuffer(monitor, normalized, sourceFramebuffer->getTexture(), sourceBox, inverseTransform))
         return nullptr;
 
     return normalized;
