@@ -44,7 +44,7 @@ https://github.com/user-attachments/assets/d3e7625f-a831-474a-ac85-02dca635beda
 
 ```sh
 hyprpm update
-hyprpm add https://github.com/gfhdhytghd/hymission
+hyprpm add https://github.com/XSilverTH/hymission feature/application-search-uwsm
 hyprpm enable hymission
 hyprpm reload
 ```
