@@ -1244,8 +1244,16 @@ SP<Render::IFramebuffer> normalizeMonitorFramebuffer(const PHLMONITOR& monitor, 
     setFramebufferLinearFiltering(*normalized);
     // Hyprland snapshots use the output's physical buffer dimensions. Convert
     // them back to transformed monitor space before logical crops or scaling.
+    // Texture transforms rotate the quad itself, so the unrotated quad must
+    // keep the physical dimensions and share the transformed target's center.
     const auto inverseTransform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
-    if (!renderTextureIntoFramebuffer(monitor, normalized, sourceFramebuffer->getTexture(), CBox(0, 0, width, height), inverseTransform, true))
+    const CBox sourceBox{
+        (static_cast<double>(width) - sourceFramebuffer->m_size.x) * 0.5,
+        (static_cast<double>(height) - sourceFramebuffer->m_size.y) * 0.5,
+        sourceFramebuffer->m_size.x,
+        sourceFramebuffer->m_size.y,
+    };
+    if (!renderTextureIntoFramebuffer(monitor, normalized, sourceFramebuffer->getTexture(), sourceBox, inverseTransform, true))
         return nullptr;
 
     return normalized;
